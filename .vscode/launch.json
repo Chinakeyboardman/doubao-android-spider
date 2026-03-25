@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python: run.py (豆包爬虫)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/run.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "justMyCode": true
+    },
+    {
+      "name": "Python: 当前文件",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "justMyCode": true
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+# recon 脚本使用仓库根目录 requirements.txt（uiautomator2 等）。
+# jadx 为系统安装：brew install jadx

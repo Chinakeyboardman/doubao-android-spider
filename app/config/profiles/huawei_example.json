@@ -1,0 +1,6 @@
+{
+  "_comment": "华为设备示例 profile — 仅需覆盖与 default 不同的字段",
+  "safe_swipe_x_ratio": 0.22,
+  "scroll_bottom_duration": 0.30,
+  "slow_scroll_duration": 0.40
+}

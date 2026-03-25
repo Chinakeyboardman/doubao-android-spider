@@ -1,0 +1,5 @@
+# 可选：Frida Gadget 注入（run_capture.py gadget-patch）与运行时 frida 客户端
+# 请在项目 .venv 中安装：source .venv/bin/activate && pip install -r requirements-frida.txt
+# Python 3.14 等环境若 pip 解析不到 frida-tools 16+，可固定为 12.x–14.x：
+frida-tools>=12.0.0,<15
+objection>=1.9.0

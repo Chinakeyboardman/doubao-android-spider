@@ -1,0 +1,146 @@
+---
+description: Python 代码格式、缩进、循环深度与入参出参严格约定
+globs: "**/*.py"
+alwaysApply: false
+---
+
+# 代码格式与数据结构（Python）
+
+## 权威与业界共识（写新代码时对齐）
+
+下列规范在 **Python 官方 PEP** 与 **Google Python Style Guide**（大量国内外团队参考）中高度一致，本仓库 **新代码优先遵守**；与下文「本项目额外硬性规则」冲突时，以 **本文件内标注的硬性规则** 为准。
+
+| 来源 | 要点 |
+|------|------|
+| **PEP 8** | 命名、行长、空行、import 顺序、空格与可读性。 |
+| **PEP 484 / 526 / 585** | 类型注解；**3.9+** 内置泛型如 `list[str]`；**3.10+** PEP 604 联合类型；低版本用 `typing.Optional` 与 `typing.List` 等。 |
+| **PEP 257** | docstring 风格（本仓库说明性注释以 **中文** 为主，见 `doubao-spider.mdc`）。 |
+| **Google Python Style Guide** | 早返回、控制嵌套深度、异常要具体、避免魔法数、模块级常量、类型注解覆盖公共 API。 |
+| **工程共识** | 显式优于隐式；失败快速（fail-fast）；边界校验；可测试的小函数；避免可变默认参数。 |
+
+## 缩进与空白
+
+- **一律使用 4 个空格**作为缩进层级；**禁止使用 Tab** 混排。
+- 与 PEP 8 对齐：运算符两侧、逗号后空格等保持可读；新文件风格与 `app/` 现有模块保持一致。
+- 续行优先括号隐式续行，避免反斜杠续行。
+- **行长**：无工具强制时建议 **≤ 100**（与许多团队 Black/ruff 配置一致）；超长以括号断行，不把大量逻辑挤在一行。
+
+## 命名（PEP 8 + 常见工程实践）
+
+- **模块 / 函数 / 变量 / 方法**：`snake_case`。
+- **类 / 异常**：`PascalCase`；异常类名以 `Error` 结尾。
+- **常量**（模块级、配置键名以外的「真常量」）：`UPPER_SNAKE_CASE`。
+- **「内部」**：单前置下划线 `_helper` 表示模块内约定私有，**非**强行隐藏。
+- **布尔变量 / 函数**：用 **谓词** 命名，如 `is_chat_window`、`has_cards`、`should_retry`。
+
+## 控制流：`for` 嵌套深度
+
+- **`for` / `while` 嵌套深度须小于 3**（即最多两层循环体内再套一层；若含 `if` 内 `for` 仍计入嵌套深度）。
+- 超过时**必须**重构，例如：
+  - 抽成独立函数（`def _iter_xxx` / `def _process_batch`）；
+  - 使用 `continue` / `break` 减少内层分支；
+  - 用生成器、`itertools`、或小函数 map 单层循环（避免在推导式里再堆多层 `for`）。
+- 例外：仅当算法本质为三维网格且无法再拆时，须在函数上方用**中文注释**说明原因与范围。
+
+### 优秀案例：早返回、浅嵌套（Google / 业界常见）
+
+优先 **卫语句** 把异常路径提前结束，主逻辑留在函数后部、缩进更浅：
+
+```python
+# 推荐：早返回，主路径扁平
+def process_reply(device, prompt: str) -> bool:
+    if not prompt.strip():
+        log_error("提示词为空")
+        return False
+    if device is None:
+        log_error("设备未连接")
+        return False
+    # 主逻辑
+    return _do_capture(device, prompt)
+
+
+# 不推荐：主逻辑埋在深层 if 里
+def process_reply_bad(device, prompt: str) -> bool:
+    if prompt.strip():
+        if device is not None:
+            return _do_capture(device, prompt)
+        else:
+            log_error("设备未连接")
+    else:
+        log_error("提示词为空")
+    return False
+```
+
+## 入参 / 出参「严格模式」
+
+目标：减少「裸 `dict` 传来传去」导致的静默错误，尤其在模块边界与 JSON/文件交互处。
+
+- **对外可调用的函数**（跨模块调用、入口、Worker 主流程）：
+  - 必须有 **类型注解**（参数 + 返回值）；
+  - 复杂结构优先 **`dataclass`** 或 **`TypedDict`**（Python 3.8+）或 **`NamedTuple`**，避免无文档的嵌套 `dict`。
+- **从 JSON / 网络 / 子进程读取的数据**：
+  - 在进入业务逻辑前做 **显式校验**（`keys` 检查、`isinstance`、或 Pydantic 等）；校验失败应 **明确报错或记录** 并短路返回，不要默默用 `.get` 吞掉。
+- **返回值**：
+  - 多字段结果优先 **小型 dataclass / TypedDict**，字段名固定；避免返回「魔法字符串 key」且调用方靠记忆拼写。
+- 与 `app/config/config.py` 的配置字典：读取后若传入深层逻辑，建议在边界处 **拷贝为不可变视图或转为 dataclass**，避免运行中误改全局 dict。
+
+### 优秀案例：边界用模型，不用「深 dict」
+
+```python
+from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass(frozen=True)
+class CardItem:
+    title: str
+    link: str
+
+
+def parse_card_payload(raw: object) -> Optional[CardItem]:
+    # 显式校验，失败即返回 None 或抛错，不静默
+    if not isinstance(raw, dict):
+        return None
+    title = raw.get("title")
+    link = raw.get("link")
+    if not isinstance(title, str) or not isinstance(link, str) or not link:
+        return None
+    return CardItem(title=title, link=link)
+```
+
+### 反例：无类型、无校验、静默吞错
+
+```python
+# 不推荐：调用方不知道有哪些 key，错了也难查
+def parse_card_bad(raw):
+    return {"t": raw.get("title"), "u": raw.get("url")}  # key 还与上游不一致
+```
+
+## 类型与常见写法（PEP 585 / 习惯用法）
+
+- **`Optional[X]`** 与 **`X | None`**（Python 3.10+）二选一，**同一文件内保持一致**；目标版本低于 3.10 时统一用 `Optional`。
+- **集合空判断**：若语义是「有无元素」，用 `if items:`；需要区分 `None` 与空列表时显式写 `if items is None`。
+- **`None` 比较**：**只用 `is` / `is not`**，不用 `== None`。
+- **可变默认参数**：禁止 `def f(x=[]):`；改用 `None` + 函数体内新建 `list`。
+- **字符串拼接**：优先 **`f-string`**（PEP 498），少用大量 `+`。
+- **路径**：新代码优先 **`pathlib.Path`**，与 `os.path` 混用时保持单函数内风格一致。
+- **文件与资源**：用 **`with`** 管理文件与需关闭的资源（context manager）。
+- **固定枚举**：一组固定取值用 **`enum.Enum`** 或 `Literal[...]`，避免魔法字符串散落。
+
+## 异常与日志（大厂工程常见要求）
+
+- **禁止** `except:`、`except Exception:` **吞掉一切** 且不记录、不抛出；至少打日志或向上转换为明确业务错误。
+- **优先捕获具体异常**（如 `json.JSONDecodeError`、`OSError`），最后一层再考虑宽捕获并带 **完整 traceback**（`log_error(..., exc_info=True)` 或等价）。
+- **不要**用异常做普通分支控制（性能与可读性差）；用 `if` / 返回值表达预期分支。
+
+## Import 顺序（与 isort / Google 常见约定一致）
+
+1. **标准库**  
+2. **第三方库**（uiautomator2、requests 等）  
+3. **本项目**（`app.xxx`）  
+
+各组之间 **空一行**；组内可按字母序，与现有文件保持一致即可。
+
+## 与现有规则的关系
+
+- 说明性注释、日志语言仍遵循 `doubao-spider.mdc`（中文等）。

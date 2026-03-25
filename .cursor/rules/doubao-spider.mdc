@@ -1,0 +1,41 @@
+---
+description: 豆包 APP 爬虫项目约定（uiautomator2、中文注释、聊天页识别）
+globs: "**/*.py"
+alwaysApply: false
+---
+
+# 豆包 APP 爬虫
+
+## 语言与注释
+
+- 与用户说明、文档、代码内说明性注释 **一律使用中文**。
+- 日志/print 关键步骤用简短中文，便于真机联调时对照。
+
+## 技术栈
+
+- 设备自动化：**uiautomator2**（`DeviceManager` → `self.device`）。
+- 启动入口：`run.py`；业务主类：`app/main.py` 中 `DoubaoSpider`。
+- 配置集中：`app/config/config.py`（包名、Activity、聊天提示文案子串等）。
+
+## 聊天窗口识别
+
+- 不要只依赖 `dumpsys mCurrentFocus`，须结合界面元素。
+- 聊天页特征：输入条提示含「发信息」「按住说话」等（见 `DOUBAO_CONFIG["chat_hint_substrings"]`）。
+- 发送流程：**先输入再发送**；`input_output` 里发送失败时优先检查是否未输入或仍在语音模式。
+
+## 新增选择器时
+
+- 优先 `resource-id`；无则 `text` / `content-desc`；再考虑 `xpath` + `contains`。
+- 版本差异大时用「多策略顺序尝试」，单点 resource-id 写死易碎。
+
+## 文档
+
+- 方案说明放在 `doc/`，保持**简略**，避免长篇重复代码。
+
+## 其它规则文件
+
+- **理解业务需求**：见 `business-context.mdc`（须先查 `doc/` 与既有代码，`alwaysApply: true`）。
+- **格式与数据结构**：见同目录 `code-style.mdc`（缩进、`for` 嵌套、入参出参严格模式）。
+- **跨语言 / 通用模式 / 分布式与异步**：见 `architecture-patterns.mdc`。
+- **微服务**：见 `microservices.mdc`。
+- **DDD 与领域模型**：见 `ddd-domain.mdc`。
