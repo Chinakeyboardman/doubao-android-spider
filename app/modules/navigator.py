@@ -13,10 +13,13 @@ import time
 from enum import Enum, auto
 from typing import Any, Optional
 
+from app.modules.chat_ui_heuristics import has_chat_ui
+
 
 class Page(Enum):
     UNKNOWN = auto()
     LOGIN = auto()
+    HOME = auto()            # AliasActivity — 新版豆包首页/聊天壳
     CHAT = auto()
     APPLET_LIST = auto()     # AppletActivity — 搜索结果/商品列表
     WEB_DETAIL = auto()      # WebActivity — 商品详情 H5
@@ -28,6 +31,7 @@ PACKAGE = "com.larus.nova"
 
 _PAGE_RULES: list[tuple[str, Page]] = [
     ("chat.ChatActivity", Page.CHAT),
+    ("home.impl.alias.AliasActivity", Page.HOME),
     ("AccountLoginActivity", Page.LOGIN),
     ("PhoneLoginActivity", Page.LOGIN),
     ("VerificationCodeActivity", Page.LOGIN),
@@ -71,7 +75,15 @@ class Navigator:
                 # 即使 Activity 是 Chat，也可能有分享面板覆盖在上面
                 if page == Page.CHAT and self._has_share_overlay():
                     return Page.SHARE_OVERLAY, cur
+                if page in (Page.CHAT, Page.HOME) and has_chat_ui(self.d):
+                    if self._has_share_overlay():
+                        return Page.SHARE_OVERLAY, cur
+                    return Page.CHAT, cur
                 return page, cur
+        if has_chat_ui(self.d):
+            if self._has_share_overlay():
+                return Page.SHARE_OVERLAY, cur
+            return Page.CHAT, cur
         return Page.UNKNOWN, cur
 
     def _has_share_overlay(self) -> bool:
@@ -118,6 +130,42 @@ class Navigator:
             time.sleep(1.0)
             return True
         return False
+
+    def lite_back_to_chat(self) -> bool:
+        """引用 URL 解析用：单次 back + 一次校验，失败再最多补 1 次。"""
+        p0, cur0 = self.current_page()
+        act0 = (cur0.get("activity") or "").rsplit(".", 1)[-1]
+        print(f"  [导航] lite_back 前: {p0.name} act={act0}")
+        self.d.press("back")
+        time.sleep(0.35)
+        p, cur = self.current_page()
+        act = (cur.get("activity") or "").rsplit(".", 1)[-1]
+        if p == Page.CHAT:
+            print(f"  [导航] lite_back 后: {p.name} act={act}")
+            return True
+        if p == Page.SHARE_OVERLAY:
+            print(f"  [导航] lite_back 关闭分享面板")
+            self.d.press("back")
+            time.sleep(0.35)
+            p, cur = self.current_page()
+            act = (cur.get("activity") or "").rsplit(".", 1)[-1]
+            print(f"  [导航] lite_back 后: {p.name} act={act}")
+            return p == Page.CHAT
+        if p == Page.OTHER_APP:
+            print(f"  [导航] lite_back 落在外部 App({act})，重启豆包")
+            self.d.app_start(PACKAGE)
+            time.sleep(1.0)
+            p, cur = self.current_page()
+            act = (cur.get("activity") or "").rsplit(".", 1)[-1]
+            print(f"  [导航] lite_back 后: {p.name} act={act}")
+            return p == Page.CHAT
+        print(f"  [导航] lite_back 补按 back（当前 {p.name} act={act}）")
+        self.d.press("back")
+        time.sleep(0.35)
+        p, cur = self.current_page()
+        act = (cur.get("activity") or "").rsplit(".", 1)[-1]
+        print(f"  [导航] lite_back 后: {p.name} act={act}")
+        return p == Page.CHAT
 
     def safe_back_to_chat(self, max_backs: int = 6) -> bool:
         """从任意页面安全返回 ChatActivity，自动处理分享面板等覆盖层。"""
@@ -173,6 +221,37 @@ class Navigator:
                 try:
                     txt = (n.info.get("text") or "").strip()
                     if any(s in txt for s in signals):
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return False
+
+    def web_detail_scroll_end_hints_visible(self) -> bool:
+        """
+        商品详情 H5 常见「已滑到底」类文案（子串匹配，用于辅助结束滚动）。
+        不同店铺文案差异大，未命中时仍依赖截图稳定判定。
+        """
+        hints = (
+            "没有更多",
+            "没有更多了",
+            "已经到底",
+            "已到底",
+            "到底了",
+            "没有更多了哦",
+            "没有相关",
+            "暂无更多",
+            "亲，没有",
+            "看完了",
+        )
+        try:
+            for n in self.d.xpath("//android.widget.TextView|//android.view.View").all():
+                try:
+                    txt = (n.info.get("text") or "").strip()
+                    if not txt:
+                        continue
+                    if any(h in txt for h in hints):
                         return True
                 except Exception:
                     continue

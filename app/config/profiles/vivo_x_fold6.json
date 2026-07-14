@@ -1,0 +1,15 @@
+{
+  "_comment": "vivo X Fold6 抽检机占位 — 连接后 adb getprop ro.product.brand/model 确认 auto key，再按真机 dump 调参",
+  "_device": "vivo X Fold6（待侦察）",
+  "_setup": "python recon/flow_recorder/recorder.py → 展开引用面板 → 对照 hierarchy 调 qa_ref_list_probe_xpaths / viewport",
+  "qa_resolve_viewport_y0": 0.16,
+  "qa_resolve_viewport_y1": 0.84,
+  "qa_shot_roi_y0": 0.10,
+  "qa_shot_roi_y1": 0.85,
+  "qa_expand_group_click_sleep": 1.4,
+  "qa_ref_list_probe_xpaths": [
+    "//*[@resource-id=\"com.larus.nova:id/sub_keyword_reference\"]//androidx.recyclerview.widget.RecyclerView",
+    "//*[@resource-id=\"com.larus.nova:id/sub_keyword_reference\"]",
+    "//*[@resource-id=\"com.larus.nova:id/search_reference_list\"]"
+  ]
+}

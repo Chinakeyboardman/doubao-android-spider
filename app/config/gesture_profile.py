@@ -11,6 +11,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+def _default_qa_ref_list_probe_xpaths() -> tuple[str, ...]:
+  """引用列表容器探测顺序（真机侦察后可在 profile JSON 覆盖）。"""
+  pkg = "com.larus.nova"
+  return (
+    f'//*[@resource-id="{pkg}:id/search_reference_list"]',
+    f'//*[@resource-id="{pkg}:id/sub_keyword_reference"]'
+    f"//androidx.recyclerview.widget.RecyclerView",
+    f'//*[@resource-id="{pkg}:id/sub_keyword_reference"]',
+  )
+
+
 @dataclass
 class GestureProfile:
     """屏幕手势与元素检测参数（比例值基于屏幕宽高，跨分辨率自适应）。"""
@@ -161,6 +172,26 @@ class GestureProfile:
     fc_detail_scroll_start_y: float = 0.75
     fc_detail_scroll_end_y: float = 0.25
     fc_detail_scroll_duration: float = 0.30
+    # Web 详情触底：最大滑动次数、停稳、ROI 与多指标静止阈值（见 web_detail_capture）
+    fc_detail_bottom_max_swipes: int = 100
+    fc_detail_bottom_post_swipe_sleep: float = 0.95
+    fc_detail_bottom_stable_swipes: int = 2
+    fc_detail_bottom_strict_fine: float = 4.0
+    fc_detail_bottom_alt_fine: float = 10.0
+    fc_detail_bottom_relax_fine: float = 36.0
+    fc_detail_bottom_relax_coarse: float = 20.0
+    fc_detail_bottom_relax_dhash: int = 26
+    fc_detail_roi_x0: float = 0.06
+    fc_detail_roi_x1: float = 0.94
+    fc_detail_roi_y0: float = 0.14
+    fc_detail_roi_y1: float = 0.86
+    # 长条截图横向裁剪（默认全宽，不误切左右商品图）；垂向仍用 fc_detail_roi_y0/y1
+    fc_detail_strip_roi_x0: float = 0.0
+    fc_detail_strip_roi_x1: float = 1.0
+    # 长条拼接：手势限制在内容区内（相对内容区顶边的比例 0~1）
+    fc_detail_strip_swipe_y_start_ratio: float = 0.86
+    fc_detail_strip_swipe_y_end_ratio: float = 0.18
+    fc_detail_strip_swipe_duration: float = 0.30
     fc_reply_top_scroll_start_y: float = 0.60
     fc_reply_top_scroll_end_y: float = 0.38
     fc_reply_top_scroll_duration: float = 0.20
@@ -170,3 +201,48 @@ class GestureProfile:
     fc_card_top_visible_y: float = 0.25
     fc_title_pixel_min_y: int = 200
     fc_title_image_max_dy: int = 200
+
+    # ── qa_capture: 问答归档几何启发式 ──
+    qa_user_bubble_cx_min: float = 0.55
+    qa_user_bubble_x1_min: float = 0.35
+    qa_assist_x1_max: float = 0.22
+    qa_assist_bw_min: float = 0.45
+    qa_assist_cx_max: float = 0.52
+    qa_scroll_top_start_y: float = 0.35
+    qa_scroll_top_end_y: float = 0.70
+    qa_scroll_top_duration: float = 0.25
+    qa_scroll_top_rounds: int = 8
+    # 问答长截图：聊天内容区 ROI + 滑动参数
+    qa_shot_roi_y0: float = 0.12
+    qa_shot_roi_y1: float = 0.83
+    qa_shot_max_frames: int = 25
+    qa_shot_scroll_start_y: float = 0.72
+    qa_shot_scroll_end_y: float = 0.32
+    qa_shot_scroll_duration: float = 0.28
+    qa_shot_post_swipe_sleep: float = 0.55
+    qa_shot_quiet_rounds: int = 2
+    qa_think_panel_scroll_rounds: int = 12
+    qa_expand_collect_max_rounds: int = 20
+    qa_expand_refs_wait: float = 3.0
+    qa_expand_refs_poll_interval: float = 0.25
+    qa_expand_group_click_sleep: float = 1.2
+    qa_resolve_url_wait: float = 3.5
+    qa_resolve_url_post_back_sleep: float = 0.5
+    qa_resolve_url_max_backs: int = 5
+    qa_resolve_url_max_refs: int = 0
+    qa_resolve_citation_max_swipes: int = 12
+    qa_resolve_prepare_list_passes: int = 8
+    qa_resolve_logcat_poll_timeout: float = 1.5
+    qa_resolve_logcat_poll_interval: float = 0.2
+    qa_resolve_batch_douyin: bool = True
+    qa_resolve_batch_douyin_timeout: float = 6.0
+    qa_resolve_skip_douyin_per_click: bool = True
+    qa_logcat_stream_settle: float = 0.15
+    qa_logcat_stream_poll_interval: float = 0.25
+    # URL 解析：引用条目视为「在屏内」的垂直 band（比例，避开状态栏/输入栏）
+    qa_resolve_viewport_y0: float = 0.18
+    qa_resolve_viewport_y1: float = 0.82
+    # 引用列表容器 xpath 探测顺序（think 面板 / fast 内联布局）
+    qa_ref_list_probe_xpaths: tuple[str, ...] = field(
+        default_factory=_default_qa_ref_list_probe_xpaths
+    )

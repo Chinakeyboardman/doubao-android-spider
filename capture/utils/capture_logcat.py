@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import TextIO
 
@@ -167,3 +169,140 @@ def dump_logcat_once(
     out_file.write_text("".join(chosen), encoding="utf-8", errors="replace")
     print(f"已写入 {len(chosen)} 行 -> {out_file}")
     return 0
+
+
+def dump_logcat_buffers(
+    *,
+    serial: str | None,
+    buffers: tuple[str, ...] = ("events", "main", "system"),
+) -> str:
+    """执行 `adb logcat -d` 读取指定 buffer，返回拼接文本。"""
+    if not adb_available():
+        return ""
+    parts: list[str] = []
+    for buf in buffers:
+        cmd = _adb_prefix(serial) + ["logcat", "-d", "-v", "brief", "-b", buf]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
+            if proc.stdout:
+                parts.append(f"\n--- buffer:{buf} ---\n")
+                parts.append(proc.stdout)
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+    return "".join(parts)
+
+
+def dump_logcat_tail(
+    *,
+    serial: str | None,
+    count: int = 80,
+    buffers: tuple[str, ...] = ("events", "main", "system"),
+) -> str:
+    """读取各 buffer 最近 count 行（点击后取 Intent 更干净）。"""
+    if not adb_available():
+        return ""
+    parts: list[str] = []
+    for buf in buffers:
+        cmd = _adb_prefix(serial) + [
+            "logcat", "-d", "-t", str(count), "-v", "brief", "-b", buf,
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20, check=False)
+            if proc.stdout:
+                parts.append(f"\n--- buffer:{buf} ---\n")
+                parts.append(proc.stdout)
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+    return "".join(parts)
+
+
+class LogcatStream:
+  """
+  常驻 adb logcat 子进程，解析引用 URL 时只读 mark 之后的新增行，避免逐条 clear/spawn。
+  """
+
+  def __init__(self, *, serial: str | None = None) -> None:
+    self.serial = serial
+    self._lines: list[str] = []
+    self._lock = threading.Lock()
+    self._read_pos = 0
+    self._proc: subprocess.Popen[str] | None = None
+    self._thread: threading.Thread | None = None
+    self._running = False
+
+  def start(self, *, settle_s: float = 0.15) -> None:
+    if self._running:
+      return
+    if not adb_available():
+      return
+    clear_logcat(serial=self.serial)
+    if settle_s > 0:
+      time.sleep(settle_s)
+    cmd = _adb_prefix(self.serial) + [
+      "logcat",
+      "-v",
+      "brief",
+      "-b",
+      "events",
+      "-b",
+      "main",
+      "-b",
+      "system",
+    ]
+    self._proc = subprocess.Popen(
+      cmd,
+      stdout=subprocess.PIPE,
+      stderr=subprocess.DEVNULL,
+      text=True,
+      bufsize=1,
+    )
+    self._running = True
+    self._thread = threading.Thread(target=self._reader, daemon=True)
+    self._thread.start()
+
+  def _reader(self) -> None:
+    proc = self._proc
+    if not proc or not proc.stdout:
+      return
+    try:
+      for line in proc.stdout:
+        if not self._running:
+          break
+        with self._lock:
+          self._lines.append(line)
+    except (OSError, ValueError):
+      pass
+
+  def stop(self) -> None:
+    self._running = False
+    proc = self._proc
+    self._proc = None
+    if proc:
+      try:
+        if proc.stdout:
+          proc.stdout.close()
+      except OSError:
+        pass
+      if proc.poll() is None:
+        proc.terminate()
+      try:
+        proc.wait(timeout=5)
+      except subprocess.TimeoutExpired:
+        proc.kill()
+    if self._thread and self._thread.is_alive():
+      self._thread.join(timeout=2)
+
+  def mark(self) -> None:
+    with self._lock:
+      self._read_pos = len(self._lines)
+
+  def text_since_mark(self) -> str:
+    with self._lock:
+      return "".join(self._lines[self._read_pos:])
+
+  def __enter__(self) -> LogcatStream:
+    self.start()
+    return self
+
+  def __exit__(self, *args: object) -> None:
+    self.stop()

@@ -16,6 +16,9 @@ logs/
 # flow_recorder 录制产物（XML/截图/jsonl），体积大且含本机操作痕迹
 recon/flow_recorder/sessions/
 
+# QA 抽检运行产物（截图/XML/CSV/state/pid），体积大且含本机采集痕迹，勿入库
+var/
+
 # jadx 反编译输出与报告（保留目录用 recon/output/.gitkeep）
 recon/output/**
 !recon/output/.gitkeep

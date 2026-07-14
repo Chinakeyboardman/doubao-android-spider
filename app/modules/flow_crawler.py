@@ -10,7 +10,7 @@
   5. 嵌入式商品卡片：`_scroll_to_reply_top` 后向下轻扫，用「可见性边沿」状态机
      发现卡片（见 `run` 内注释）；每张卡片点击进入 Applet 列表。
   6. 列表内 `_crawl_list_page`：按标题去重，最多 `max_products_per_card` 个详情，
-     每个详情 `_capture_detail` 多屏截图后 back 回列表；列表结束后 `safe_back_to_chat`。
+     每个详情 `_capture_detail` 按 ROI 触底判定滚动截图后 back 回列表；列表结束后 `safe_back_to_chat`。
 
 产出目录（`output_dir` 默认 `logs`）：
   crawl_<时间戳>/
@@ -33,6 +33,7 @@ from typing import Any, Optional
 
 from app.config.gesture_profile import GestureProfile
 from app.modules.navigator import Navigator, Page
+from app.modules.web_detail_capture import capture_web_detail_screenshots
 from app.modules.sms_login import auto_login
 from app.modules.chat_ui_heuristics import (
     collect_reply_text_candidates,
@@ -64,9 +65,62 @@ class FlowCrawler:
 
     # ==================== 启动与登录 ====================
 
-    def start_app(self, max_wait: int = 10) -> bool:
+    def _device_serial(self) -> str | None:
+        serial = getattr(self.d, "serial", None)
+        if serial:
+            return str(serial)
+        try:
+            info = self.d.info or {}
+            return info.get("serial") or info.get("udid")
+        except Exception:
+            return None
+
+    def _recover_external_app(self) -> None:
+        """从抖音 ANR/外部 App 拉回豆包。"""
+        print("  [启动] 外部 App/ANR，尝试 back + 结束抖音 + 重启豆包")
+        for _ in range(3):
+            try:
+                self.d.press("back")
+            except Exception:
+                pass
+            time.sleep(0.4)
+        try:
+            self.d.shell("am force-stop com.ss.android.ugc.aweme")
+        except Exception as exc:
+            print(f"  [启动] force-stop 抖音失败: {exc}")
+        time.sleep(0.5)
+        try:
+            self.d.app_start(self.PACKAGE)
+        except Exception:
+            pass
+        time.sleep(2.0)
+
+    def start_app(self, max_wait: int = 20) -> bool:
         print("[启动] 打开豆包...")
-        self.d.app_start(self.PACKAGE)
+        try:
+            cur = self.d.app_current() or {}
+        except Exception:
+            cur = {}
+        pkg = str(cur.get("package", ""))
+        if self.PACKAGE not in pkg:
+            if "aweme" in pkg or "ss.android" in pkg:
+                self._recover_external_app()
+            else:
+                self.d.app_start(self.PACKAGE)
+                time.sleep(1.5)
+        else:
+            p0, _ = self.nav.current_page()
+            if p0 in (Page.WEB_DETAIL, Page.APPLET_LIST, Page.OTHER_APP, Page.SHARE_OVERLAY):
+                print(f"  [启动] 上次停留在 {p0.name}，先尝试回到聊天页")
+                if p0 == Page.OTHER_APP:
+                    self._recover_external_app()
+                else:
+                    self.nav.safe_back_to_chat(max_backs=8)
+                    if not self.nav.is_chat():
+                        self.d.app_start(self.PACKAGE)
+                        time.sleep(2.0)
+
+        web_stuck = 0
         for i in range(max_wait):
             time.sleep(1)
             p, cur = self.nav.current_page()
@@ -74,11 +128,25 @@ class FlowCrawler:
             print(f"  [{i+1}s] {act} -> {p.name}")
             if p in (Page.CHAT, Page.LOGIN):
                 return True
-            # 如果停留在非聊天页（如上次遗留的 AppletActivity），尝试返回
-            if p in (Page.APPLET_LIST, Page.WEB_DETAIL, Page.SHARE_OVERLAY):
-                self.nav.safe_back_to_chat()
+            if p == Page.HOME:
+                print("  [启动] 已在豆包首页壳，视为就绪")
+                return True
+            if p == Page.OTHER_APP:
+                web_stuck = 0
+                self._recover_external_app()
+                continue
+            if p in (Page.APPLET_LIST, Page.WEB_DETAIL, Page.SHARE_OVERLAY, Page.UNKNOWN):
+                self.nav.safe_back_to_chat(max_backs=4)
                 if self.nav.is_chat():
                     return True
+                if p == Page.WEB_DETAIL:
+                    web_stuck += 1
+                    if web_stuck >= 3:
+                        print("  [启动] WebActivity 仍卡住，重启豆包")
+                        self.d.app_start(self.PACKAGE)
+                        time.sleep(2.0)
+                        web_stuck = 0
+                continue
         return False
 
     def login_via_api(self, phone: str, code: str) -> bool:
@@ -155,9 +223,20 @@ class FlowCrawler:
         p, _ = self.nav.current_page()
         if p == Page.CHAT:
             return True
+        if p == Page.OTHER_APP:
+            self._recover_external_app()
+            return self.nav.is_chat()
         if p == Page.SHARE_OVERLAY:
             self.nav.dismiss_overlay()
-        return self.nav.safe_back_to_chat()
+        if p in (Page.WEB_DETAIL, Page.APPLET_LIST):
+            self.nav.safe_back_to_chat(max_backs=8)
+            if self.nav.is_chat():
+                return True
+            print("  [导航] 仍未回聊天页，重启豆包")
+            self.d.app_start(self.PACKAGE)
+            time.sleep(2.0)
+            return self.nav.is_chat()
+        return self.nav.safe_back_to_chat(max_backs=8)
 
     def send_message(self, text: str) -> bool:
         if not self._ensure_chat():
@@ -484,39 +563,42 @@ class FlowCrawler:
         return texts
 
     def _capture_detail(self, detail_dir: str, index: int) -> dict[str, Any]:
-        result: dict[str, Any] = {"index": index, "ok": False, "screenshots": [], "texts": [], "dir": detail_dir}
+        result: dict[str, Any] = {
+            "index": index,
+            "ok": False,
+            "screenshots": [],
+            "texts": [],
+            "dir": detail_dir,
+            "detail_scroll_stop": "",
+        }
         if not self.nav.wait_web_detail_loaded(timeout=15):
             print(f"  [详情 {index}] 页面未加载完毕")
             return result
         time.sleep(1.5)
         os.makedirs(detail_dir, exist_ok=True)
-        w, h = display_wh(self.d, profile=self.p)
-        paths = []
         all_texts: list[str] = []
         seen_texts: set[str] = set()
 
-        for i in range(12):
+        def _after_shot(_path: str) -> None:
             for txt in self._extract_visible_texts():
                 if txt not in seen_texts:
                     seen_texts.add(txt)
                     all_texts.append(txt)
 
-            name = f"detail_{i+1:02d}.png"
-            path = os.path.join(detail_dir, name)
-            try:
-                self.d.screenshot(path)
-                paths.append(path)
-                print(f"  [详情 {index}] 截图 {i+1}")
-            except Exception as e:
-                print(f"  [详情 {index}] 截图失败: {e}")
-            self.d.swipe(
-                int(w * 0.5), int(h * self.p.fc_detail_scroll_start_y),
-                int(w * 0.5), int(h * self.p.fc_detail_scroll_end_y),
-                self.p.fc_detail_scroll_duration,
-            )
-            time.sleep(0.8)
-            if not self.nav.is_web_detail():
-                break
+        paths, stopped = capture_web_detail_screenshots(
+            self.d,
+            self.nav,
+            self.p,
+            detail_dir,
+            on_after_screenshot=_after_shot,
+        )
+        result["detail_scroll_stop"] = stopped
+        if not paths:
+            print(f"  [详情 {index}] 详情截图失败")
+        else:
+            for i, _p in enumerate(paths):
+                print(f"  [详情 {index}] 截图 {i + 1}")
+            print(f"  [详情 {index}] 滚动结束: {stopped}，合计 {len(paths)} 张")
 
         if all_texts:
             text_path = os.path.join(detail_dir, "detail_text.txt")

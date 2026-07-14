@@ -18,9 +18,34 @@ import json
 import re
 from dataclasses import fields
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args, get_origin
 
 from app.config.gesture_profile import GestureProfile
+
+
+def _coerce_field_value(ft: Any, v: Any) -> Any:
+    """将 JSON 值转为 dataclass 字段类型。"""
+    origin = get_origin(ft)
+    if origin is tuple:
+      if isinstance(v, list):
+        return tuple(str(x) for x in v)
+      if isinstance(v, tuple):
+        return v
+      return v
+    if origin is list:
+      if isinstance(v, list):
+        return v
+      return v
+    try:
+      if ft in ("int", int):
+        return int(v)
+      if ft in ("float", float):
+        return float(v)
+      if ft in ("bool", bool):
+        return bool(v)
+    except (TypeError, ValueError):
+      pass
+    return v
 
 
 def _profiles_dir() -> Path:
@@ -34,15 +59,7 @@ def _overlay(profile: GestureProfile, data: dict) -> GestureProfile:
         if k not in field_map:
             continue
         ft = field_map[k].type
-        try:
-            if ft in ("int", int):
-                v = int(v)
-            elif ft in ("float", float):
-                v = float(v)
-            elif ft in ("bool", bool):
-                v = bool(v)
-        except (TypeError, ValueError):
-            continue
+        v = _coerce_field_value(ft, v)
         setattr(profile, k, v)
     return profile
 

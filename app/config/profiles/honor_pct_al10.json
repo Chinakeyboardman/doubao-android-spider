@@ -1,4 +1,16 @@
 {
-  "_comment": "HONOR PCT-AL10 — 本机调试得出的参数，与 GestureProfile 默认值一致（即当前代码的原始值）",
-  "_device": "HONOR PCT-AL10 (荣耀)"
+  "_comment": "HONOR PCT-AL10 — 黄金路径 144420/145156 验证机",
+  "_device": "HONOR PCT-AL10 (荣耀)",
+  "_recon": "logs/recon4_ref_expanded.xml",
+  "qa_scroll_top_rounds": 8,
+  "qa_expand_group_click_sleep": 1.2,
+  "qa_resolve_viewport_y0": 0.18,
+  "qa_resolve_viewport_y1": 0.82,
+  "qa_resolve_batch_douyin": false,
+  "qa_resolve_skip_douyin_per_click": true,
+  "qa_ref_list_probe_xpaths": [
+    "//*[@resource-id=\"com.larus.nova:id/search_reference_list\"]",
+    "//*[@resource-id=\"com.larus.nova:id/sub_keyword_reference\"]//androidx.recyclerview.widget.RecyclerView",
+    "//*[@resource-id=\"com.larus.nova:id/sub_keyword_reference\"]"
+  ]
 }

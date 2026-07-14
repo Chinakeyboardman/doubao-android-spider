@@ -2,4 +2,6 @@ uiautomator2
 paddleocr
 paddlepaddle
 Pillow>=9.0.0
+openpyxl>=3.1.0
 requests
+pytest>=7.0.0

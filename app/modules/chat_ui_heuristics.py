@@ -13,6 +13,11 @@ from typing import Any, Iterator, Optional
 from app.config.gesture_profile import GestureProfile
 
 # 按优先级定位内容区底部（越上面越精确）
+_CHAT_INPUT_SELECTORS = (
+    '//*[@resource-id="com.larus.nova:id/input_text"]',
+    '//*[@resource-id="com.larus.nova:id/input"]',
+    '//*[@resource-id="com.larus.nova:id/action_send"]',
+)
 _CONTENT_BOTTOM_SELECTORS = (
     '//*[@resource-id="com.larus.nova:id/splitter"]',
     '//*[@resource-id="com.larus.nova:id/message_list_parent"]',
@@ -35,6 +40,18 @@ def display_wh(device: Any, profile: GestureProfile | None = None) -> tuple[int,
     w = int(info.get("displayWidth") or p.default_screen_width)
     h = int(info.get("displayHeight") or p.default_screen_height)
     return w, h
+
+
+def has_chat_ui(device: Any) -> bool:
+    """豆包前台时是否存在聊天输入区（兼容 AliasActivity 与 ChatActivity）。"""
+    for sel in _CHAT_INPUT_SELECTORS:
+        try:
+            el = device.xpath(sel).get(timeout=0.35)
+            if el:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _get_bounds_y(device: Any, selectors: tuple[str, ...], idx: int) -> Optional[int]:

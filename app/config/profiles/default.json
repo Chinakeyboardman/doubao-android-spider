@@ -1,1 +1,12 @@
-{}
+{
+  "_comment": "全机型 QA 采集默认参数；具体机型在 profiles/<brand_model>.json 覆盖",
+  "qa_shot_roi_y0": 0.12,
+  "qa_shot_roi_y1": 0.83,
+  "qa_shot_scroll_start_y": 0.72,
+  "qa_shot_scroll_end_y": 0.32,
+  "qa_resolve_viewport_y0": 0.18,
+  "qa_resolve_viewport_y1": 0.82,
+  "qa_resolve_logcat_poll_timeout": 1.5,
+  "qa_resolve_prepare_list_passes": 4,
+  "qa_resolve_batch_douyin": true
+}
