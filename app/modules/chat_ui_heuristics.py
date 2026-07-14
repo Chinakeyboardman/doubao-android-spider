@@ -110,6 +110,73 @@ def norm_prompt_keys(prompt_text: str) -> tuple[str, str]:
     return key, short_key
 
 
+_CHAT_PLACEHOLDER_TEXTS = frozenset({
+    "聊聊新话题",
+    "发消息或按住说话",
+    "发消息",
+    "输入消息",
+})
+
+
+def read_visible_user_prompt(
+    device: Any,
+    *,
+    profile: GestureProfile | None = None,
+) -> str:
+    """从当前聊天屏 hierarchy 读最后一条用户问题（非输入框占位）。"""
+    from app.modules.qa_hierarchy import parse_exchange_from_hierarchy
+
+    p = profile or GestureProfile()
+    w, h = display_wh(device, p)
+    try:
+        xml = device.dump_hierarchy(compressed=False) or ""
+    except Exception:
+        return ""
+    if not xml.strip():
+        return ""
+    parsed = parse_exchange_from_hierarchy(
+        xml, screen_w=w, screen_h=h, profile=p,
+    )
+    q = (parsed.question_text or "").strip()
+    if not q or q in _CHAT_PLACEHOLDER_TEXTS:
+        return ""
+    return q
+
+
+def prompt_matches_chat(expected: str, visible: str) -> bool:
+    """当前屏用户问题是否与期望提示词一致（容忍空白/占位）。"""
+    visible = (visible or "").strip()
+    if not visible or visible in _CHAT_PLACEHOLDER_TEXTS:
+        return False
+    exp_key, exp_short = norm_prompt_keys(expected)
+    vis_key, _ = norm_prompt_keys(visible)
+    if not exp_key:
+        return expected.strip() == visible
+    if exp_short and exp_short in vis_key:
+        return True
+    if exp_key in vis_key or vis_key in exp_key:
+        return True
+    prefix = min(16, len(exp_key), len(vis_key))
+    if prefix >= 8 and exp_key[:prefix] in vis_key:
+        return True
+    return False
+
+
+def verify_chat_prompt(
+    device: Any,
+    expected_prompt: str,
+    *,
+    profile: GestureProfile | None = None,
+) -> bool:
+    """校验当前聊天页是否为本次采集目标会话。"""
+    if not (expected_prompt or "").strip():
+        return True
+    visible = read_visible_user_prompt(device, profile=profile)
+    if not visible:
+        return False
+    return prompt_matches_chat(expected_prompt, visible)
+
+
 def iter_text_view_like_nodes(device: Any) -> Iterator[Any]:
     """遍历常见「消息文案」节点（不同 ROM/组件可能不是 android.widget.TextView）。"""
     seen: set[tuple[str, tuple[Any, ...]]] = set()

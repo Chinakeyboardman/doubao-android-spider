@@ -840,6 +840,27 @@ def apply_batch_douyin_urls(citations: list[Citation], indices: list[int], ids: 
     citations[idx].url = _iesdouyin_url(vid)
 
 
+def _chat_context_ok(
+  device: Any,
+  expected_prompt: str,
+  profile: GestureProfile,
+  tag: str,
+) -> bool:
+  if not (expected_prompt or "").strip():
+    return True
+  from app.modules.chat_ui_heuristics import read_visible_user_prompt, prompt_matches_chat
+
+  visible = read_visible_user_prompt(device, profile=profile)
+  if prompt_matches_chat(expected_prompt, visible):
+    return True
+  shown = visible[:40] if visible else "(无用户气泡)"
+  print(
+    f"[问答] URL解析会话错位({tag})：期望 {expected_prompt[:40]!r}，"
+    f"屏上 {shown!r}"
+  )
+  return False
+
+
 def try_batch_resolve_douyin(
   device: Any,
   citations: list[Citation],
@@ -1440,6 +1461,7 @@ def _resolve_one_citation_url(
   stream: LogcatStream | None = None,
   recent_logcat_urls: list[str] | None = None,
   brute_force: bool = False,
+  expected_prompt: str = "",
 ) -> str:
   """单条引用：mark → 点击 → 从流/logcat 解析 → lite back。"""
   serial = serial or _device_serial(device)
@@ -1592,6 +1614,11 @@ def _resolve_one_citation_url(
   _reanchor_ref_list_after_back(device, profile, nav, tag=f"#{ref_idx} 解析后")
   time.sleep(profile.qa_resolve_url_post_back_sleep)
 
+  if expected_prompt and not _chat_context_ok(
+    device, expected_prompt, profile, f"#{ref_idx} 返回后",
+  ):
+    return ""
+
   if url and recent_logcat_urls is not None and method in ("auto", "logcat"):
     recent_logcat_urls.append(url)
 
@@ -1629,6 +1656,7 @@ def _resolve_pending_pass(
   max_refs: int = 0,
   attempts_so_far: int = 0,
   resolved_by_index: dict[int, str],
+  expected_prompt: str = "",
 ) -> int:
   """按 pass 解析 pending 子集；返回累计 attempts。"""
   limit = max_refs if max_refs > 0 else len(citations)
@@ -1638,6 +1666,9 @@ def _resolve_pending_pass(
       break
     if citation.url:
       continue
+    if not _chat_context_ok(device, expected_prompt, profile, pass_label):
+      print(f"[问答] {pass_label} 中止：已离开目标会话")
+      break
 
     channel = classify_citation_channel(citation)
     if channels is not None and channel not in channels:
@@ -1672,7 +1703,14 @@ def _resolve_pending_pass(
       stream=stream,
       recent_logcat_urls=recent_logcat_urls,
       brute_force=brute_force,
+      expected_prompt=expected_prompt,
     )
+
+    if expected_prompt and not _chat_context_ok(
+      device, expected_prompt, profile, f"{pass_label} #{citation.ref_index or '?'}"
+    ):
+      print(f"[问答] {pass_label} 中止：点击返回后会话错位")
+      break
 
     if url:
       citation.url = url
@@ -1699,6 +1737,7 @@ def resolve_thinking_reference_urls(
   serial: str | None = None,
   max_refs: int = 0,
   method: ResolveMethod = "logcat",
+  expected_prompt: str = "",
 ) -> list[Citation]:
   """
   逐条点击思考引用，解析真实 HTTP 链接写回 Citation.url。
@@ -1718,6 +1757,9 @@ def resolve_thinking_reference_urls(
   if page != Page.CHAT:
     print("[问答] 当前不在聊天页，尝试返回豆包...")
     nav.safe_back_to_chat(max_backs=p.qa_resolve_url_max_backs)
+  if not _chat_context_ok(device, expected_prompt, p, "解析入口"):
+    print("[问答] URL 解析中止：当前屏不是目标会话")
+    return citations
 
   limit = max_refs if max_refs > 0 else len(citations)
   attempts = 0
@@ -1782,6 +1824,7 @@ def resolve_thinking_reference_urls(
         max_refs=limit,
         attempts_so_far=attempts,
         resolved_by_index=resolved_by_index,
+        expected_prompt=expected_prompt,
       )
 
     pending = _pending_sorted(citations)
@@ -1804,6 +1847,7 @@ def resolve_thinking_reference_urls(
         max_refs=limit,
         attempts_so_far=attempts,
         resolved_by_index=resolved_by_index,
+        expected_prompt=expected_prompt,
       )
   finally:
     stream.stop()

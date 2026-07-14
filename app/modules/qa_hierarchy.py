@@ -63,6 +63,7 @@ _UI_NOISE_TEXTS = (
     "语音输入",
     "更多面板",
     "发消息或按住说话",
+    "聊聊新话题",
 )
 _ACTION_BAR_RID_MARKERS = (
     "msg_action_",

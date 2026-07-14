@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from app.modules.qa_hierarchy import Citation
+from app.modules.chat_ui_heuristics import prompt_matches_chat
 from app.modules.qa_reference_urls import (
   apply_batch_douyin_urls,
   classify_citation_channel,
@@ -236,6 +236,14 @@ def test_scroll_direction_for_missing_citation():
   assert _scroll_direction_for_missing_citation(cite, (1, 12)) == "down"
   assert _scroll_direction_for_missing_citation(cite, (15, 18)) == "up"
   assert _scroll_direction_for_missing_citation(cite, None) == "down"
+
+
+def test_prompt_matches_chat():
+  exp = "AI折叠手机2026年推荐几款？"
+  assert prompt_matches_chat(exp, exp)
+  assert prompt_matches_chat(exp, "AI折叠手机2026年推荐几款")
+  assert not prompt_matches_chat(exp, "聊聊新话题")
+  assert not prompt_matches_chat(exp, "AI功能强大的折叠屏手机推荐哪款？")
 
 
 def test_classify_citation_channel():

@@ -25,6 +25,8 @@ from app.modules.chat_ui_heuristics import (
   get_query_anchor_bounds,
   iter_text_view_like_nodes,
   norm_prompt_keys,
+  read_visible_user_prompt,
+  verify_chat_prompt,
 )
 from app.modules.detail_strip_stitch import (
   crop_fullscreen_to_detail_content,
@@ -49,6 +51,9 @@ from app.modules.web_detail_capture import metric_quiet, roi_pair_metrics
 from app.utils.utils import build_session_dir, poll_until
 
 DEEP_THINK_TOGGLE_XPATH = '//*[contains(@content-desc,"深度思考")]'
+NEW_CHAT_XPATHS_STRICT = (
+  '//*[@content-desc="创建新对话"]',
+)
 NEW_CHAT_XPATHS = (
   '//*[@content-desc="创建新对话"]',
   '//*[@resource-id="com.larus.nova:id/right_img"]',
@@ -300,13 +305,16 @@ class DoubaoQaCapture:
   def _open_new_conversation(self) -> bool:
     """创建新对话，落到干净 ChatActivity。"""
     self._dismiss_overlays()
-    for sel in NEW_CHAT_XPATHS:
+    for sel in NEW_CHAT_XPATHS_STRICT:
       try:
         el = self.d.xpath(sel).get(timeout=1.5)
         if el:
           el.click()
           self._wait_new_conversation_ready()
           print("[问答] 已点击创建新对话")
+          if self._looks_like_stale_chat():
+            print("[问答] 新建后仍见历史问题气泡，退回列表重试")
+            break
           return True
       except Exception:
         continue
@@ -328,6 +336,9 @@ class DoubaoQaCapture:
           el.click()
           self._wait_new_conversation_ready()
           print("[问答] 已从列表创建新对话")
+          if self._looks_like_stale_chat():
+            print("[问答] 从列表新建后仍见历史问题，放弃")
+            return False
           return True
       except Exception:
         continue
@@ -348,6 +359,22 @@ class DoubaoQaCapture:
         return True
     except Exception as exc:
       print(f"[问答] 创建新对话失败: {exc}")
+    return False
+
+  def _looks_like_stale_chat(self) -> bool:
+    """新建对话后若屏上已有较长用户问题，说明可能误入了历史会话。"""
+    visible = read_visible_user_prompt(self.d, profile=self.p)
+    return bool(visible and len(visible) >= 8)
+
+  def _ensure_expected_chat(self, prompt: str, *, phase: str) -> bool:
+    if verify_chat_prompt(self.d, prompt, profile=self.p):
+      return True
+    visible = read_visible_user_prompt(self.d, profile=self.p)
+    shown = visible[:48] if visible else "(无用户气泡)"
+    print(
+      f"[问答] 会话错位({phase})：期望 {prompt[:48]!r}，"
+      f"屏上 {shown!r}"
+    )
     return False
 
   def _select_mode(self, mode: str) -> bool:
@@ -1104,11 +1131,17 @@ class DoubaoQaCapture:
     time.sleep(0.35)
     return _get_ref_list_bounds(self.d, self.p) is not None
 
-  def _prepare_refs_for_url_resolve(self, thinking_refs: list[Citation]) -> None:
+  def _prepare_refs_for_url_resolve(
+    self, thinking_refs: list[Citation], *, expected_prompt: str = "",
+  ) -> bool:
     """解析 URL 前滚回思考面板、重新展开引用并刷新 bounds。"""
     from app.modules.qa_reference_urls import prepare_citations_for_url_resolve, _get_ref_list_bounds
 
     self._ensure_chat()
+    if expected_prompt and not self._ensure_expected_chat(
+      expected_prompt, phase="URL解析前",
+    ):
+      return False
     if not self._restore_ref_panel_visible():
       print("[问答] 引用面板恢复失败，尝试滚顶后再展开...")
       self._scroll_message_to_top()
@@ -1117,6 +1150,7 @@ class DoubaoQaCapture:
     if _get_ref_list_bounds(self.d, self.p) is None:
       print("[问答] 警告: 引用列表仍不可见，URL 解析可能跳过部分条目")
     prepare_citations_for_url_resolve(self.d, thinking_refs, profile=self.p)
+    return True
 
   def _resolve_reference_urls(
     self,
@@ -1125,6 +1159,7 @@ class DoubaoQaCapture:
     method: ResolveMethod = "logcat",
     net_dump_dir: str = "",
     net_since_mtime: float | None = None,
+    expected_prompt: str = "",
   ) -> list[Citation]:
     if not thinking_refs:
       return thinking_refs
@@ -1139,23 +1174,29 @@ class DoubaoQaCapture:
       missing = [r for r in refs if not r.url]
       if missing:
         print(f"[问答] 网络抓包未覆盖 {len(missing)} 条，回落 logcat 逐条点击...")
-        self._prepare_refs_for_url_resolve(refs)
+        if not self._prepare_refs_for_url_resolve(refs, expected_prompt=expected_prompt):
+          return refs
         return resolve_thinking_reference_urls(
           self.d,
           refs,
           profile=self.p,
           max_refs=self.p.qa_resolve_url_max_refs,
           method="logcat",
+          expected_prompt=expected_prompt,
         )
       return refs
 
-    self._prepare_refs_for_url_resolve(thinking_refs)
+    if not self._prepare_refs_for_url_resolve(
+      thinking_refs, expected_prompt=expected_prompt,
+    ):
+      return thinking_refs
     return resolve_thinking_reference_urls(
       self.d,
       thinking_refs,
       profile=self.p,
       max_refs=self.p.qa_resolve_url_max_refs,
       method=method,
+      expected_prompt=expected_prompt,
     )
 
   def _scroll_visible_ref_lists(self) -> None:
@@ -1425,6 +1466,10 @@ class DoubaoQaCapture:
       if not self._crawler.wait_reply_done(timeout=180):
         print("[问答] 等待回复超时，继续尝试采集当前屏内容")
       _phase("等待回复完成")
+      if not self._ensure_expected_chat(prompt, phase="回复完成后"):
+        print("[问答] 中止采集：当前不在目标会话（可能落入历史对话）")
+        self._save_record(record)
+        return record
 
     # 等待回答操作栏（复制按钮）就绪后再采集；就绪即继续，未就绪退回原固定等待时长
     poll_until(
@@ -1468,6 +1513,7 @@ class DoubaoQaCapture:
           method=resolve_method,
           net_dump_dir=net_dump_dir,
           net_since_mtime=capture_started_at if resolve_method == "net" else None,
+          expected_prompt=prompt,
         )
         self._sync_urls_to_panel(thinking_panel, thinking_refs_for_resolve)
 
@@ -1529,20 +1575,24 @@ class DoubaoQaCapture:
           f"[问答] 回落解析剩余引用 URL（{len(need)} 条，method={resolve_method}）..."
         )
         self._ensure_chat()
-        if not self._restore_ref_panel_visible():
+        can_fallback = self._ensure_expected_chat(prompt, phase="回落URL解析前")
+        if can_fallback and not self._restore_ref_panel_visible():
           print("[问答] 回落前引用列表不可见，再次尝试恢复面板...")
           self._scroll_message_to_top()
           time.sleep(0.4)
           self._restore_ref_panel_visible()
         from app.modules.qa_reference_urls import _get_ref_list_bounds
 
-        if _get_ref_list_bounds(self.d, self.p) is not None:
+        if can_fallback and _get_ref_list_bounds(self.d, self.p) is not None:
           thinking_refs = self._resolve_reference_urls(
             thinking_refs,
             method=resolve_method,
             net_dump_dir=net_dump_dir,
             net_since_mtime=capture_started_at if resolve_method == "net" else None,
+            expected_prompt=prompt,
           )
+        elif not can_fallback:
+          print("[问答] 回落解析跳过：会话已错位（避免在历史对话上空转）")
         else:
           print("[问答] 回落解析跳过：无法恢复引用列表（避免空转卡死）")
         if thinking_panel.references or thinking_panel.groups:
