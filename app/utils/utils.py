@@ -2,6 +2,7 @@ import os
 import time
 import logging
 from datetime import datetime
+from typing import Callable
 
 # 配置日志
 logging.basicConfig(
@@ -23,6 +24,32 @@ def ensure_directory(path):
         os.makedirs(path, exist_ok=True)
         logger.info(f"创建目录: {path}")
     return path
+
+
+def poll_until(
+    predicate: Callable[[], bool],
+    timeout: float,
+    interval: float = 0.15,
+    settle: float = 0.0,
+) -> bool:
+    """在 timeout 秒内轮询 predicate()，为真则（可选 settle 后）返回 True；超时返回 False。
+
+    用于把"固定等待"替换为"轮询到就绪即继续"：调用方应把 timeout 设为
+    >= 原固定 sleep 时长，并在返回 False 时保留原有兜底行为，从而保证
+    最坏情况不劣于改动前（稳定性/完整性优先）。predicate 内部异常按未就绪处理。
+    """
+    deadline = time.time() + max(0.0, timeout)
+    while True:
+        try:
+            if predicate():
+                if settle > 0:
+                    time.sleep(settle)
+                return True
+        except Exception:
+            pass
+        if time.time() >= deadline:
+            return False
+        time.sleep(interval)
 
 
 def build_session_dir(

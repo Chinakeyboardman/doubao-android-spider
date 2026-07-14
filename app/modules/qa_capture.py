@@ -46,7 +46,7 @@ from app.modules.qa_hierarchy import (
 from app.modules.qa_reference_urls import ResolveMethod, resolve_thinking_reference_urls
 from app.modules.qa_reference_net import resolve_urls_from_net_dump
 from app.modules.web_detail_capture import metric_quiet, roi_pair_metrics
-from app.utils.utils import build_session_dir
+from app.utils.utils import build_session_dir, poll_until
 
 DEEP_THINK_TOGGLE_XPATH = '//*[contains(@content-desc,"深度思考")]'
 NEW_CHAT_XPATHS = (
@@ -276,6 +276,27 @@ class DoubaoQaCapture:
         continue
     self._crawler.nav.dismiss_overlay()
 
+  def _input_box_ready(self) -> bool:
+    """聊天输入框是否可见（新会话就绪信号）。"""
+    for sel in (
+      '//*[@resource-id="com.larus.nova:id/input_text"]',
+      '//*[contains(@class,"EditText")]',
+    ):
+      try:
+        if self.d.xpath(sel).get(timeout=0.1):
+          return True
+      except Exception:
+        continue
+    return False
+
+  def _wait_new_conversation_ready(self) -> None:
+    """等待新会话落地（输入框出现）。就绪即继续，未就绪则退回原固定等待时长。
+
+    timeout 取原固定 sleep(2.0)，保证最坏情况不劣于改动前；settle 仅在
+    提前就绪时生效，用于规避新旧页切换的竞态。
+    """
+    poll_until(self._input_box_ready, timeout=2.0, interval=0.15, settle=0.3)
+
   def _open_new_conversation(self) -> bool:
     """创建新对话，落到干净 ChatActivity。"""
     self._dismiss_overlays()
@@ -284,7 +305,7 @@ class DoubaoQaCapture:
         el = self.d.xpath(sel).get(timeout=1.5)
         if el:
           el.click()
-          time.sleep(2.0)
+          self._wait_new_conversation_ready()
           print("[问答] 已点击创建新对话")
           return True
       except Exception:
@@ -305,7 +326,7 @@ class DoubaoQaCapture:
         el = self.d.xpath(sel).get(timeout=2.0)
         if el:
           el.click()
-          time.sleep(2.0)
+          self._wait_new_conversation_ready()
           print("[问答] 已从列表创建新对话")
           return True
       except Exception:
@@ -322,7 +343,7 @@ class DoubaoQaCapture:
       ).get(timeout=1.0)
       if item:
         item.click()
-        time.sleep(2.0)
+        self._wait_new_conversation_ready()
         print("[问答] 已通过菜单创建新对话")
         return True
     except Exception as exc:
@@ -343,7 +364,19 @@ class DoubaoQaCapture:
         toggle = self.d.xpath(sel).get(timeout=1.5)
         if toggle:
           toggle.click()
-          time.sleep(0.7)
+          # 等待模式菜单项出现；就绪即继续，未就绪退回原固定等待时长
+          poll_until(
+            lambda: bool(
+              self.d.xpath(
+                '//*[(@resource-id="com.larus.nova:id/menu_text"'
+                ' or @resource-id="com.larus.nova:id/tv_item_name")'
+                f' and @text="{label}"]'
+              ).get(timeout=0.1)
+            ),
+            timeout=0.7,
+            interval=0.1,
+            settle=0.15,
+          )
           opened = True
           break
       except Exception:
@@ -364,7 +397,17 @@ class DoubaoQaCapture:
         self._dismiss_overlays()
         return False
       item.click()
-      time.sleep(0.6)
+      # 等待菜单收起（菜单项消失）；就绪即继续，未就绪退回原固定等待时长
+      poll_until(
+        lambda: not self.d.xpath(
+          '//*[(@resource-id="com.larus.nova:id/menu_text"'
+          ' or @resource-id="com.larus.nova:id/tv_item_name")'
+          f' and @text="{label}"]'
+        ).get(timeout=0.1),
+        timeout=0.6,
+        interval=0.1,
+        settle=0.1,
+      )
       self._dismiss_overlays()
       print(f"[问答] 已选择模式: {label}")
       return True
@@ -1038,18 +1081,41 @@ class DoubaoQaCapture:
         if url:
           r.url = url
 
-  def _prepare_refs_for_url_resolve(self, thinking_refs: list[Citation]) -> None:
-    """解析 URL 前滚回思考面板、重新展开引用并刷新 bounds。"""
-    from app.modules.qa_reference_urls import prepare_citations_for_url_resolve
+  def _restore_ref_panel_visible(self) -> bool:
+    """URL 解析/回落前尽量恢复可见的引用列表面板。"""
+    from app.modules.qa_reference_urls import _get_ref_list_bounds
 
-    self._scroll_message_to_top()
-    time.sleep(0.5)
-    if not self._thinking_panel_on_screen():
-      self._scroll_to_thinking_panel()
-      time.sleep(0.4)
+    shot_count = 4
+    locate_rounds = min(
+      self.p.qa_scroll_top_rounds + 16,
+      max(8, shot_count * 4 + 6),
+    )
+    self._scroll_to_thinking_panel(max_rounds=locate_rounds)
     self._ensure_thinking_header_expanded()
     self._expand_visible_search_groups(set())
     time.sleep(0.5)
+    if _get_ref_list_bounds(self.d, self.p) is not None:
+      return True
+    # 再轻扫一轮外层列表，引用区可能在当前屏下方
+    self._swipe_message_list_down()
+    time.sleep(0.35)
+    self._ensure_thinking_header_expanded()
+    self._expand_visible_search_groups(set())
+    time.sleep(0.35)
+    return _get_ref_list_bounds(self.d, self.p) is not None
+
+  def _prepare_refs_for_url_resolve(self, thinking_refs: list[Citation]) -> None:
+    """解析 URL 前滚回思考面板、重新展开引用并刷新 bounds。"""
+    from app.modules.qa_reference_urls import prepare_citations_for_url_resolve, _get_ref_list_bounds
+
+    self._ensure_chat()
+    if not self._restore_ref_panel_visible():
+      print("[问答] 引用面板恢复失败，尝试滚顶后再展开...")
+      self._scroll_message_to_top()
+      time.sleep(0.4)
+      self._restore_ref_panel_visible()
+    if _get_ref_list_bounds(self.d, self.p) is None:
+      print("[问答] 警告: 引用列表仍不可见，URL 解析可能跳过部分条目")
     prepare_citations_for_url_resolve(self.d, thinking_refs, profile=self.p)
 
   def _resolve_reference_urls(
@@ -1337,7 +1403,13 @@ class DoubaoQaCapture:
     if not skip_send:
       if not self._open_new_conversation():
         print("[问答] 创建新对话失败，继续在当前会话采集")
-      time.sleep(1.2)
+      # 等待模式切换入口就绪；就绪即继续，未就绪退回原固定等待时长
+      poll_until(
+        lambda: bool(self.d.xpath(MODE_MENU_XPATH).get(timeout=0.1)),
+        timeout=1.2,
+        interval=0.15,
+        settle=0.2,
+      )
       for attempt in range(3):
         if self._select_mode(mode):
           break
@@ -1354,7 +1426,15 @@ class DoubaoQaCapture:
         print("[问答] 等待回复超时，继续尝试采集当前屏内容")
       _phase("等待回复完成")
 
-    time.sleep(1.0)
+    # 等待回答操作栏（复制按钮）就绪后再采集；就绪即继续，未就绪退回原固定等待时长
+    poll_until(
+      lambda: bool(
+        self.d.xpath('//*[@resource-id="com.larus.nova:id/msg_action_copy"]').get(timeout=0.1)
+      ),
+      timeout=1.0,
+      interval=0.15,
+      settle=0.15,
+    )
     self._ensure_chat()
     self._dismiss_overlays()
 
@@ -1449,17 +1529,13 @@ class DoubaoQaCapture:
           f"[问答] 回落解析剩余引用 URL（{len(need)} 条，method={resolve_method}）..."
         )
         self._ensure_chat()
-        self._prepare_refs_for_url_resolve(need)
+        if not self._restore_ref_panel_visible():
+          print("[问答] 回落前引用列表不可见，再次尝试恢复面板...")
+          self._scroll_message_to_top()
+          time.sleep(0.4)
+          self._restore_ref_panel_visible()
         from app.modules.qa_reference_urls import _get_ref_list_bounds
 
-        if _get_ref_list_bounds(self.d, self.p) is None:
-          print("[问答] 回落前引用列表不可见，重新滚顶并展开思考面板...")
-          self._scroll_message_to_top()
-          time.sleep(0.5)
-          self._ensure_thinking_header_expanded()
-          self._expand_visible_search_groups(set())
-          time.sleep(0.5)
-          self._prepare_refs_for_url_resolve(need)
         if _get_ref_list_bounds(self.d, self.p) is not None:
           thinking_refs = self._resolve_reference_urls(
             thinking_refs,

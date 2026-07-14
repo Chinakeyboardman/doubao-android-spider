@@ -7,25 +7,25 @@ todos:
     status: completed
   - id: commit-source
     content: git add 源码并提交（复核 var/ 未被暂存）
-    status: in_progress
+    status: completed
   - id: tag-push
     content: 打 tag v0.1.0 并 push main 与 tag 到 origin
-    status: pending
+    status: completed
   - id: poll-helper
     content: 在 app/utils/utils.py 增加 poll_until 轮询助手
-    status: pending
+    status: completed
   - id: convert-newconv
     content: _open_new_conversation/_run_capture_body 新会话就绪改条件轮询（带兜底）
-    status: pending
+    status: completed
   - id: convert-mode
     content: _select_mode 开菜单/选中改条件轮询（带兜底）
-    status: pending
+    status: completed
   - id: convert-postreply
     content: wait_reply_done 后的 settle 改为轮询复制按钮就绪（带兜底）
-    status: pending
+    status: completed
   - id: verify
     content: 跑测试 + 重启 worker 核对计时与采集完整性，异常则回滚 v0.1.0
-    status: pending
+    status: completed
 isProject: false
 ---
 

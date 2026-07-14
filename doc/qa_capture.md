@@ -78,6 +78,32 @@ logs/qa_capture/2026-07-10/145156/
 
 ```
 var/雅诗兰黛/qa_capture/2026-07-14/120830/
+```
+
+**抽检批次**（同项目多轮跑批时与旧批次隔离；每批次独立目录）：
+
+```
+var/vivo-x-fold6/
+├── 签单提示词导出_20260710_183049.csv    # 项目共用输入
+├── run_unattended.sh                     # 指向当前活跃批次
+└── spot_check/
+    ├── 20260710/                         # 已完成旧批次（123 条）
+    │   ├── 抽检明细_APP采集.csv
+    │   ├── spot_check_state.json
+    │   ├── spot_check_run.log
+    │   └── qa_capture/2026-07-11/…
+    └── 20260714/                         # 进行中批次
+        ├── 抽检明细_APP采集.csv
+        ├── spot_check_state.json
+        └── qa_capture/2026-07-14/…
+```
+
+环境变量 `SPOT_CHECK_BATCH_DIR` 指向批次目录；`scripts/run_unattended_spot_check.sh` 默认将全部产出写入该目录。单元测试黄金样本仍保留在 `logs/qa_capture/2026-07-10/145156/` 等路径。
+
+单次会话目录内容示例：
+
+```
+var/雅诗兰黛/qa_capture/2026-07-14/120830/
 ├── record.json
 ├── question.txt
 ├── thinking.md              # 结构化思考过程 + 各搜索组引用（含 URL）
@@ -213,31 +239,42 @@ python run_qa_capture.py --device-profile vivo_x_fold6 --prompt "..."
 # 试点 10 条（跨意图抽样）
 python run_qa_spot_check.py \
   --prompts-csv var/vivo-x-fold6/签单提示词导出_20260710_183049.csv \
-  --out-csv var/vivo-x-fold6/抽检明细_20260710_APP采集.csv \
+  --out-csv var/vivo-x-fold6/spot_check/20260714/抽检明细_APP采集.csv \
+  --state-file var/vivo-x-fold6/spot_check/20260714/spot_check_state.json \
+  --out-dir var/vivo-x-fold6/spot_check/20260714 \
   --pilot 10 --mode fast --strict
 
 # 全量续跑（跳过 CSV 中已有 关键词编号）
 python run_qa_spot_check.py --resume --strict
 
-# 雅诗兰黛（xlsx 签单 + 项目隔离目录）
+# 雅诗兰黛（xlsx 签单 + 批次目录）
 python run_qa_spot_check.py \\
   --prompts-file var/雅诗兰黛/签单提示词导出_20260714_000454.xlsx \\
-  --out-csv var/雅诗兰黛/抽检明细_20260714_APP采集.csv \\
-  --state-file var/雅诗兰黛/spot_check_state.json \\
-  --project 雅诗兰黛 \\
+  --out-csv var/雅诗兰黛/spot_check/20260714/抽检明细_APP采集.csv \\
+  --state-file var/雅诗兰黛/spot_check/20260714/spot_check_state.json \\
+  --out-dir var/雅诗兰黛/spot_check/20260714 \\
   --resume --mode fast
 
 # 清理引用/URL 不达标行后全量续跑（logs 会话保留）
 python run_qa_spot_check.py --purge-incomplete --resume --strict --allow-partial-douyin-urls
 ```
 
+**无人值守（screen + monitor）**：通用引擎在 `scripts/run_unattended_spot_check.sh`；**项目专用包装脚本放在 `var/<项目>/run_unattended.sh`（不入 git）**，由 AI 按签单路径改写后执行，例如：
+
+```bash
+bash var/vivo-x-fold6/run_unattended.sh start   # status / stop / restart
+```
+
+`scripts/` 仅保留通用、demo 与测试辅助脚本，不提交临时项目包装。
+
 | 项 | 值 | 说明 |
 |----|-----|------|
 | 输入 | 签单提示词 CSV | 提示词 + 意图编号/名称/词包等绑定字段 |
-| 产出 CSV | `var/vivo-x-fold6/抽检明细_*_APP采集.csv` | 每提示词一行 |
+| 产出 CSV | `var/<项目>/spot_check/<批次>/抽检明细_APP采集.csv` | 每提示词一行 |
 | 平台 | `DB` / `豆包` / `APP` | 与参考 xlsx 的 DS/PC 区分，反映真机采集来源 |
-| 断点 | `spot_check_state.json` | 已完成关键词编号与 session_dir |
-| 失败 | `spot_check_failures.jsonl` | 质量不达标或采集失败，不写入 CSV |
+| 会话 | `var/<项目>/spot_check/<批次>/qa_capture/` | 与 CSV 同批次 |
+| 断点 | `spot_check/<批次>/spot_check_state.json` | 已完成关键词编号与 session_dir |
+| 失败 | `spot_check/<批次>/spot_check_failures.jsonl` | 质量不达标或采集失败，不写入 CSV |
 | 抖音 URL | 默认 `--allow-partial-douyin-urls` | 批量解析后跳过逐条点击，避免卡抖音 feed |
 
 映射逻辑：`app/modules/qa_spot_check_export.py`（意图字段仅来自签单 CSV，不从采集结果推断）。

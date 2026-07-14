@@ -1,20 +1,36 @@
 #!/usr/bin/env bash
 # 无人值守抽检：screen 会话跑 worker + monitor（脱离 Cursor/IDE 终端）
-# 通过环境变量切换项目，默认 vivo-x-fold6。
+#
+# 通用入口：通过环境变量配置项目路径与产出文件。
+# 项目专用包装脚本请放在 var/<项目>/run_unattended.sh（不入 git），示例：
+#   bash var/vivo-x-fold6/run_unattended.sh start
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 VAR_DIR="${SPOT_CHECK_VAR_DIR:-var/vivo-x-fold6}"
+BATCH_DIR="${SPOT_CHECK_BATCH_DIR:-}"
+WORK_DIR="${BATCH_DIR:-$VAR_DIR}"
+
 PROMPTS_FILE="${SPOT_CHECK_PROMPTS_FILE:-${VAR_DIR}/签单提示词导出_20260710_183049.csv}"
-OUT_CSV="${SPOT_CHECK_OUT_CSV:-${VAR_DIR}/抽检明细_20260710_APP采集.csv}"
-STATE_FILE="${SPOT_CHECK_STATE_FILE:-${VAR_DIR}/spot_check_state.json}"
-FAILURES_FILE="${SPOT_CHECK_FAILURES_FILE:-${VAR_DIR}/spot_check_failures.jsonl}"
+if [[ -n "$BATCH_DIR" ]]; then
+  OUT_CSV="${SPOT_CHECK_OUT_CSV:-${BATCH_DIR}/抽检明细_APP采集.csv}"
+  STATE_FILE="${SPOT_CHECK_STATE_FILE:-${BATCH_DIR}/spot_check_state.json}"
+  FAILURES_FILE="${SPOT_CHECK_FAILURES_FILE:-${BATCH_DIR}/spot_check_failures.jsonl}"
+  LOG="${SPOT_CHECK_LOG:-${BATCH_DIR}/spot_check_run.log}"
+  MONITOR_LOG="${SPOT_CHECK_MONITOR_LOG:-${BATCH_DIR}/spot_check_monitor.log}"
+  PID_FILE="${SPOT_CHECK_PID_FILE:-${BATCH_DIR}/spot_check.pid}"
+  LOCK_DIR="${SPOT_CHECK_LOCK_DIR:-${BATCH_DIR}/spot_check.lock.d}"
+else
+  OUT_CSV="${SPOT_CHECK_OUT_CSV:-${VAR_DIR}/抽检明细_20260710_APP采集.csv}"
+  STATE_FILE="${SPOT_CHECK_STATE_FILE:-${VAR_DIR}/spot_check_state.json}"
+  FAILURES_FILE="${SPOT_CHECK_FAILURES_FILE:-${VAR_DIR}/spot_check_failures.jsonl}"
+  LOG="${SPOT_CHECK_LOG:-${VAR_DIR}/spot_check_run.log}"
+  MONITOR_LOG="${SPOT_CHECK_MONITOR_LOG:-${VAR_DIR}/spot_check_monitor.log}"
+  PID_FILE="${SPOT_CHECK_PID_FILE:-${VAR_DIR}/spot_check.pid}"
+  LOCK_DIR="${SPOT_CHECK_LOCK_DIR:-${VAR_DIR}/spot_check.lock.d}"
+fi
 PROJECT_SLUG="${SPOT_CHECK_PROJECT:-}"
-LOG="${SPOT_CHECK_LOG:-${VAR_DIR}/spot_check_run.log}"
-MONITOR_LOG="${SPOT_CHECK_MONITOR_LOG:-${VAR_DIR}/spot_check_monitor.log}"
-PID_FILE="${SPOT_CHECK_PID_FILE:-${VAR_DIR}/spot_check.pid}"
-LOCK_DIR="${SPOT_CHECK_LOCK_DIR:-${VAR_DIR}/spot_check.lock.d}"
 SCREEN_WORKER="${SPOT_CHECK_SCREEN_WORKER:-spotcheck_worker}"
 SCREEN_MONITOR="${SPOT_CHECK_SCREEN_MONITOR:-spotcheck_monitor}"
 SERIAL="${ADB_SERIAL:-46H0219118001437}"
@@ -24,7 +40,7 @@ worker_cmd() {
   cat <<EOF
 set -euo pipefail
 cd "$ROOT"
-mkdir -p "$VAR_DIR"
+mkdir -p "$WORK_DIR"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   if ! pgrep -f "run_qa_spot_check.py" >/dev/null 2>&1; then
     rmdir "$LOCK_DIR" 2>/dev/null || true
@@ -41,7 +57,7 @@ exec caffeinate -i .venv/bin/python run_qa_spot_check.py \\
   --out-csv "$OUT_CSV" \\
   --state-file "$STATE_FILE" \\
   --failures-file "$FAILURES_FILE" \\
-  --out-dir "$VAR_DIR" \\
+  --out-dir "$WORK_DIR" \\
   --project "$PROJECT_SLUG" \\
   --purge-incomplete \\
   --resume \\
@@ -66,7 +82,7 @@ start_worker() {
     return 0
   fi
   rmdir "$LOCK_DIR" 2>/dev/null || true
-  echo "===== UNATTENDED WORKER $(date '+%Y-%m-%d %H:%M:%S') serial=${SERIAL} var=${VAR_DIR} =====" >>"$LOG"
+  echo "===== UNATTENDED WORKER $(date '+%Y-%m-%d %H:%M:%S') serial=${SERIAL} var=${VAR_DIR} batch=${BATCH_DIR:-—} work=${WORK_DIR} =====" >>"$LOG"
   screen -dmS "$SCREEN_WORKER" bash -lc "$(worker_cmd) >>\"$LOG\" 2>&1"
   sleep 2
   if pgrep -f "run_qa_spot_check.py" >/dev/null 2>&1; then
@@ -83,7 +99,7 @@ start_monitor() {
     return 0
   fi
   screen -dmS "$SCREEN_MONITOR" bash -lc \
-    "cd \"$ROOT\" && export SPOT_CHECK_VAR_DIR=\"$VAR_DIR\" SPOT_CHECK_OUT_CSV=\"$OUT_CSV\" SPOT_CHECK_TOTAL=\"$TOTAL\" SPOT_CHECK_MONITOR_LOG=\"$MONITOR_LOG\" SPOT_CHECK_PID_FILE=\"$PID_FILE\" && exec bash scripts/monitor_spot_check.sh 90 ${TOTAL} >>\"$MONITOR_LOG\" 2>&1"
+    "cd \"$ROOT\" && export SPOT_CHECK_VAR_DIR=\"$VAR_DIR\" SPOT_CHECK_BATCH_DIR=\"$BATCH_DIR\" SPOT_CHECK_OUT_CSV=\"$OUT_CSV\" SPOT_CHECK_TOTAL=\"$TOTAL\" SPOT_CHECK_MONITOR_LOG=\"$MONITOR_LOG\" SPOT_CHECK_PID_FILE=\"$PID_FILE\" && exec bash scripts/monitor_spot_check.sh 90 ${TOTAL} >>\"$MONITOR_LOG\" 2>&1"
   sleep 1
   echo "monitor 已启动 (screen=${SCREEN_MONITOR}, interval=90s)"
 }
@@ -107,6 +123,10 @@ status() {
   local done_n
   done_n=$(count_csv_rows)
   echo "项目: ${VAR_DIR}"
+  if [[ -n "$BATCH_DIR" ]]; then
+    echo "批次: ${BATCH_DIR}"
+  fi
+  echo "产出: ${WORK_DIR}"
   echo "CSV完成: ${done_n}/${TOTAL}"
   if pgrep -f "\.venv/bin/python run_qa_spot_check\.py" >/dev/null 2>&1; then
     echo "worker: running pid=$(pgrep -f '\.venv/bin/python run_qa_spot_check\.py' | head -1)"

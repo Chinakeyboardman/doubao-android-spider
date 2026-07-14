@@ -54,11 +54,8 @@ maybe_restart() {
   echo "[$ts] 批量进程已退出且完成 ${done_n}/${TOTAL}，自动续跑" | tee -a "$MONITOR_LOG"
   if [[ -n "${SPOT_CHECK_RESTART_SCRIPT:-}" ]]; then
     bash "$SPOT_CHECK_RESTART_SCRIPT" restart >>"$MONITOR_LOG" 2>&1 || true
-  elif [[ -x scripts/run_unattended_spot_check.sh ]]; then
-    export SPOT_CHECK_VAR_DIR="$VAR_DIR" SPOT_CHECK_OUT_CSV="$CSV" SPOT_CHECK_TOTAL="$TOTAL"
-    bash scripts/run_unattended_spot_check.sh restart >>"$MONITOR_LOG" 2>&1 || true
   else
-    nohup bash scripts/run_spot_check_batch.sh </dev/null >>"$MONITOR_LOG" 2>&1 &
+    echo "[$ts] 未配置 SPOT_CHECK_RESTART_SCRIPT，请在 var/<项目>/run_unattended.sh 中设置后手动重启" | tee -a "$MONITOR_LOG"
   fi
   sleep 5
 }

@@ -6,6 +6,7 @@ from __future__ import annotations
 from app.modules.qa_hierarchy import Citation
 from app.modules.qa_reference_urls import (
   apply_batch_douyin_urls,
+  classify_citation_channel,
   extract_aweme_ids_ordered,
   extract_urls_from_dumpsys_text,
   extract_urls_from_logcat_text,
@@ -198,7 +199,10 @@ def test_is_likely_douyin_citation_heuristic():
 def test_should_skip_douyin_url_resolve_keeps_web_citations():
   from app.config.gesture_profile import GestureProfile
 
-  p = GestureProfile(qa_resolve_skip_douyin_per_click=True)
+  p = GestureProfile(
+    qa_resolve_skip_douyin_per_click=True,
+    qa_resolve_batch_douyin=False,
+  )
   douyin = Citation(title="#折叠屏对比 #推荐", source="")
   web = Citation(title="OPPO Find N6 产品参数 | OPPO 官方网站", source="")
   web_hash = Citation(title="万元预算推荐:OPPO Find N6领衔_PConline太平洋科技", source="")
@@ -206,6 +210,17 @@ def test_should_skip_douyin_url_resolve_keeps_web_citations():
   assert not should_skip_douyin_url_resolve(web, p)
   assert not should_skip_douyin_url_resolve(web_hash, p)
   assert looks_like_web_citation(web)
+
+
+def test_should_skip_douyin_off_when_batch_enabled():
+  from app.config.gesture_profile import GestureProfile
+
+  p = GestureProfile(
+    qa_resolve_skip_douyin_per_click=True,
+    qa_resolve_batch_douyin=True,
+  )
+  douyin = Citation(title="#折叠屏对比 #推荐", source="")
+  assert not should_skip_douyin_url_resolve(douyin, p)
 
 
 def test_should_skip_douyin_off_when_profile_disabled():
@@ -221,6 +236,18 @@ def test_scroll_direction_for_missing_citation():
   assert _scroll_direction_for_missing_citation(cite, (1, 12)) == "down"
   assert _scroll_direction_for_missing_citation(cite, (15, 18)) == "up"
   assert _scroll_direction_for_missing_citation(cite, None) == "down"
+
+
+def test_classify_citation_channel():
+  web = Citation(title="OPPO Find N6 产品参数 | OPPO 官方网站", source="")
+  douyin = Citation(title="#折叠屏对比 #推荐", source="")
+  unknown = Citation(title="vivo X Fold6发布：7999元起", source="")
+  assert classify_citation_channel(web) == "web"
+  assert classify_citation_channel(douyin) == "douyin"
+  assert classify_citation_channel(unknown) == "unknown"
+  assert classify_citation_channel(
+    Citation(title="IT之家评测", source="IT之家"),
+  ) == "web"
 
 
 def test_citation_swipe_budget_scales_with_index():

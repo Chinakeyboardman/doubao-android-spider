@@ -6,7 +6,7 @@
   "qa_expand_group_click_sleep": 1.2,
   "qa_resolve_viewport_y0": 0.18,
   "qa_resolve_viewport_y1": 0.82,
-  "qa_resolve_batch_douyin": false,
+  "qa_resolve_batch_douyin": true,
   "qa_resolve_skip_douyin_per_click": true,
   "qa_ref_list_probe_xpaths": [
     "//*[@resource-id=\"com.larus.nova:id/search_reference_list\"]",

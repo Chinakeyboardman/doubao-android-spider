@@ -36,16 +36,6 @@ def _url_resolve_passes(
   if ref_count <= 0:
     return False, "0 条引用"
 
-  if max_missing_ratio is not None:
-    min_required = _min_urls_required(ref_count, max_missing_ratio)
-    ok = url_count >= min_required
-    pct = int((1 - max_missing_ratio) * 100)
-    detail = (
-      f"{url_count}/{ref_count}（缺失>{int(ref_count * max_missing_ratio)} 条即失败，"
-      f"至少 {min_required} 条有链接）"
-    )
-    return ok, detail
-
   if allow_missing_douyin_urls:
     from app.modules.qa_hierarchy import Citation
     from app.modules.qa_reference_urls import is_likely_douyin_citation
@@ -68,11 +58,33 @@ def _url_resolve_passes(
     ]
     required_url_count = sum(1 for r in required_refs if _ref_has_url(r))
     if required_refs:
-      ok = required_url_count == len(required_refs)
-      detail = f"网页 {required_url_count}/{len(required_refs)}，合计 {url_count}/{ref_count}"
-    else:
-      ok = url_count > 0
-      detail = f"{url_count}/{ref_count}（仅抖音引用）"
+      if max_missing_ratio is not None:
+        min_required = _min_urls_required(len(required_refs), max_missing_ratio)
+        ok = required_url_count >= min_required
+        detail = (
+          f"网页 {required_url_count}/{len(required_refs)}（至少 {min_required} 条有链接），"
+          f"合计 {url_count}/{ref_count}"
+        )
+      else:
+        ok = required_url_count == len(required_refs)
+        detail = f"网页 {required_url_count}/{len(required_refs)}，合计 {url_count}/{ref_count}"
+      return ok, detail
+    if max_missing_ratio is not None:
+      min_required = _min_urls_required(ref_count, max_missing_ratio)
+      ok = url_count >= min_required
+      detail = f"{url_count}/{ref_count}（仅抖音引用，至少 {min_required} 条有链接）"
+      return ok, detail
+    ok = url_count > 0
+    detail = f"{url_count}/{ref_count}（仅抖音引用）"
+    return ok, detail
+
+  if max_missing_ratio is not None:
+    min_required = _min_urls_required(ref_count, max_missing_ratio)
+    ok = url_count >= min_required
+    detail = (
+      f"{url_count}/{ref_count}（缺失>{int(ref_count * max_missing_ratio)} 条即失败，"
+      f"至少 {min_required} 条有链接）"
+    )
     return ok, detail
 
   if require_all_urls:

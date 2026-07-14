@@ -582,6 +582,13 @@ def _find_citation_element(
 
 
 ResolveMethod = Literal["auto", "logcat", "dumpsys", "net"]
+CitationChannel = Literal["douyin", "web", "unknown"]
+
+_CHANNEL_RESOLVE_ORDER: dict[CitationChannel, int] = {
+  "web": 0,
+  "douyin": 1,
+  "unknown": 2,
+}
 
 
 def _device_serial(device: Any) -> str | None:
@@ -756,6 +763,21 @@ def looks_like_web_citation(citation: Citation) -> bool:
   return False
 
 
+def classify_citation_channel(citation: Citation) -> CitationChannel:
+  """
+  引用渠道分类（决定先用哪种技术手段，未命中再走笨办法逐条点击）。
+
+  - web：标题/来源具网页特征，优先 logcat/dumpsys 解析 Intent
+  - douyin：高置信短视频，可走批量 aweme id 或逐条解析
+  - unknown：无规则，仅能通过点击+抓包笨办法尝试
+  """
+  if looks_like_web_citation(citation):
+    return "web"
+  if is_likely_douyin_citation(citation):
+    return "douyin"
+  return "unknown"
+
+
 def should_skip_douyin_url_resolve(
   citation: Citation,
   profile: GestureProfile,
@@ -763,9 +785,12 @@ def should_skip_douyin_url_resolve(
   """
   是否跳过该引用的逐条点击 URL 解析。
 
-  仅跳过高置信抖音短视频；网页类引用仍全量解析。引用条目本身不删除。
+  仅当「关闭抖音批量且明确只要网页 URL」时跳过高置信抖音条目；
+  开启批量后逐条 logcat/dumpsys 作为兜底，不再跳过。
   """
   if not profile.qa_resolve_skip_douyin_per_click:
+    return False
+  if profile.qa_resolve_batch_douyin:
     return False
   if looks_like_web_citation(citation):
     return False
@@ -1414,14 +1439,18 @@ def _resolve_one_citation_url(
   method: ResolveMethod,
   stream: LogcatStream | None = None,
   recent_logcat_urls: list[str] | None = None,
+  brute_force: bool = False,
 ) -> str:
   """单条引用：mark → 点击 → 从流/logcat 解析 → lite back。"""
   serial = serial or _device_serial(device)
   ref_idx = citation.ref_index or "?"
+  channel = classify_citation_channel(citation)
+  logcat_timeout = profile.qa_resolve_logcat_poll_timeout * (2.0 if brute_force else 1.0)
+  dumpsys_wait = profile.qa_resolve_url_wait * (1.25 if brute_force else 1.0)
   _log_page(nav, f"#{ref_idx} 解析前")
   _log_url(
-    f"开始解析 #{ref_idx} method={method} "
-    f"douyin={is_likely_douyin_citation(citation)} title={citation.title[:48]!r}"
+    f"开始解析 #{ref_idx} channel={channel} method={method} "
+    f"brute={brute_force} title={citation.title[:48]!r}"
   )
 
   if stream is not None:
@@ -1443,12 +1472,11 @@ def _resolve_one_citation_url(
       return ""
 
   _log_page(nav, f"#{ref_idx} 点击后")
-  douyin_ref = is_likely_douyin_citation(citation)
 
   if stream is not None and method in ("auto", "logcat"):
     url = poll_logcat_stream_for_url(
       stream,
-      timeout_s=profile.qa_resolve_logcat_poll_timeout,
+      timeout_s=logcat_timeout,
       poll_interval_s=profile.qa_resolve_logcat_poll_interval,
     )
   else:
@@ -1475,7 +1503,9 @@ def _resolve_one_citation_url(
 
   # logcat 未命中时，先在同屏（WebActivity/抖音）读 dumpsys，避免过早 back 丢 Intent
   if not url and method in ("auto", "logcat"):
-    url = resolve_url_via_dumpsys(device, serial=serial, wait_s=0.6)
+    url = resolve_url_via_dumpsys(
+      device, serial=serial, wait_s=0.6 if not brute_force else min(dumpsys_wait, 1.0),
+    )
     if url:
       _log_url(f"#{ref_idx} dumpsys 同屏命中: {url[:96]}")
     else:
@@ -1488,7 +1518,7 @@ def _resolve_one_citation_url(
     if page_now in (Page.WEB_DETAIL, Page.OTHER_APP):
       _log_url(f"#{ref_idx} 详情页 dumpsys 加长等待")
       url = resolve_url_via_dumpsys(
-        device, serial=serial, wait_s=profile.qa_resolve_url_wait,
+        device, serial=serial, wait_s=dumpsys_wait,
       )
       if url:
         _log_url(f"#{ref_idx} 详情页 dumpsys 命中: {url[:96]}")
@@ -1501,12 +1531,12 @@ def _resolve_one_citation_url(
       page_now, _ = nav.current_page()
       if page_now != Page.CHAT:
         url = resolve_url_via_dumpsys(
-          device, serial=serial, wait_s=profile.qa_resolve_url_wait,
+          device, serial=serial, wait_s=dumpsys_wait,
         )
       if not url and stream is not None:
         url = poll_logcat_stream_for_url(
           stream,
-          timeout_s=profile.qa_resolve_logcat_poll_timeout,
+          timeout_s=logcat_timeout,
           poll_interval_s=profile.qa_resolve_logcat_poll_interval,
         )
       if not url:
@@ -1516,16 +1546,16 @@ def _resolve_one_citation_url(
           clear_logcat(serial=serial)
           time.sleep(profile.qa_logcat_stream_settle)
         if _click_citation(device, citation, profile=profile):
-          time.sleep(0.7)
+          time.sleep(0.9 if brute_force else 0.7)
           page_now, _ = nav.current_page()
           if page_now != Page.CHAT:
             url = resolve_url_via_dumpsys(
-              device, serial=serial, wait_s=profile.qa_resolve_url_wait,
+              device, serial=serial, wait_s=dumpsys_wait,
             )
           elif stream is not None:
             url = poll_logcat_stream_for_url(
               stream,
-              timeout_s=profile.qa_resolve_logcat_poll_timeout,
+              timeout_s=logcat_timeout,
               poll_interval_s=profile.qa_resolve_logcat_poll_interval,
             )
     if not url and page_now != Page.CHAT:
@@ -1542,7 +1572,7 @@ def _resolve_one_citation_url(
         device, citation, profile=profile,
       ):
         url = resolve_url_via_dumpsys(
-          device, serial=serial, wait_s=profile.qa_resolve_url_wait,
+          device, serial=serial, wait_s=dumpsys_wait,
         )
         if url:
           _log_url(f"#{ref_idx} dumpsys 命中: {url[:96]}")
@@ -1568,6 +1598,99 @@ def _resolve_one_citation_url(
   return url
 
 
+def _pending_sorted(citations: list[Citation]) -> list[tuple[int, Citation]]:
+  pending: list[tuple[int, Citation]] = [
+    (i, c) for i, c in enumerate(citations) if not c.url
+  ]
+  pending.sort(
+    key=lambda x: (
+      x[1].ref_index or 9999,
+      x[1].bounds[1] if x[1].bounds else 0,
+    ),
+  )
+  return pending
+
+
+def _resolve_pending_pass(
+  device: Any,
+  citations: list[Citation],
+  pending: list[tuple[int, Citation]],
+  *,
+  nav: Navigator,
+  profile: GestureProfile,
+  serial: str | None,
+  click_method: ResolveMethod,
+  stream: LogcatStream,
+  recent_logcat_urls: list[str],
+  pass_label: str,
+  channels: set[CitationChannel] | None = None,
+  brute_force: bool = False,
+  apply_skip_policy: bool = False,
+  max_refs: int = 0,
+  attempts_so_far: int = 0,
+  resolved_by_index: dict[int, str],
+) -> int:
+  """按 pass 解析 pending 子集；返回累计 attempts。"""
+  limit = max_refs if max_refs > 0 else len(citations)
+  attempts = attempts_so_far
+  for idx, citation in pending:
+    if max_refs > 0 and attempts >= limit:
+      break
+    if citation.url:
+      continue
+
+    channel = classify_citation_channel(citation)
+    if channels is not None and channel not in channels:
+      continue
+
+    if apply_skip_policy and should_skip_douyin_url_resolve(citation, profile):
+      print(
+        f"[问答] {pass_label} 跳过抖音引用（技术阶段）: "
+        f"#{citation.ref_index or '?'} {citation.title[:40]!r}"
+      )
+      continue
+
+    if not _ensure_citation_visible(device, citation, profile):
+      print(
+        f"[问答] {pass_label} 引用不可见，跳过: "
+        f"#{citation.ref_index or '?'} {citation.title[:40]!r}"
+      )
+      continue
+
+    print(
+      f"[问答] {pass_label} {attempts + 1}/{limit}: "
+      f"#{citation.ref_index or '?'} channel={channel} "
+      f"{citation.title[:36]!r}"
+    )
+    url = _resolve_one_citation_url(
+      device,
+      citation,
+      nav=nav,
+      profile=profile,
+      serial=serial,
+      method=click_method,
+      stream=stream,
+      recent_logcat_urls=recent_logcat_urls,
+      brute_force=brute_force,
+    )
+
+    if url:
+      citation.url = url
+      resolved_by_index[idx] = url
+      print(
+        f"[问答] {pass_label} URL: "
+        f"{citation.ref_index or '?'} -> {url[:80]}"
+      )
+    else:
+      print(
+        f"[问答] {pass_label} 未解析到 URL: "
+        f"#{citation.ref_index or '?'} {citation.title[:40]!r}"
+      )
+
+    attempts += 1
+  return attempts
+
+
 def resolve_thinking_reference_urls(
   device: Any,
   citations: list[Citation],
@@ -1580,7 +1703,8 @@ def resolve_thinking_reference_urls(
   """
   逐条点击思考引用，解析真实 HTTP 链接写回 Citation.url。
 
-  method: logcat（默认，点击后快速抓 Intent）、auto（logcat→dumpsys）、dumpsys；net 见 qa_reference_net。
+  分三阶段：抖音批量 → 技术逐条（web/douyin 渠道）→ 笨办法补齐剩余。
+  method: logcat（默认）、auto（logcat→dumpsys）、dumpsys；net 见 qa_reference_net。
   """
   p = profile or GestureProfile()
   nav = Navigator(device)
@@ -1603,12 +1727,16 @@ def resolve_thinking_reference_urls(
   stream = LogcatStream(serial=serial)
   stream.start(settle_s=p.qa_logcat_stream_settle)
   resolved_by_index: dict[int, str] = {}
-  batch_douyin_ok = False
   try:
+    pending_before = _pending_sorted(citations)
     if (
       p.qa_resolve_batch_douyin
       and click_method in ("auto", "logcat")
-      and sum(1 for c in citations if not c.url) >= 2
+      and len(pending_before) >= 2
+      and any(
+        classify_citation_channel(c) == "douyin"
+        for _, c in pending_before
+      )
     ):
       batch_douyin_ok = try_batch_resolve_douyin(
         device,
@@ -1618,61 +1746,65 @@ def resolve_thinking_reference_urls(
         stream=stream,
       )
       if not batch_douyin_ok:
-        print("[问答] 抖音批量未通过校验，回落 plan P1 逐条 logcat/dumpsys")
-    elif not p.qa_resolve_batch_douyin and p.qa_resolve_skip_douyin_per_click:
-      print("[问答] 抖音批量已关闭，仅解析网页类引用 URL（抖音条目保留无链接）")
+        print("[问答] 抖音批量未通过校验，回落技术逐条 + 笨办法补齐")
+    elif not p.qa_resolve_batch_douyin:
+      print("[问答] 抖音批量已关闭，抖音条目走技术逐条/笨办法逐条点击")
 
-    # 自上而下解析：引用列表内滚动，避免整页滑走后上方条目不可见
-    pending: list[tuple[int, Citation]] = [
-      (i, c) for i, c in enumerate(citations) if not c.url
+    pending = _pending_sorted(citations)
+    tech_pending = [
+      (i, c)
+      for i, c in pending
+      if classify_citation_channel(c) in ("web", "douyin")
     ]
-    pending.sort(
+    tech_pending.sort(
       key=lambda x: (
+        _CHANNEL_RESOLVE_ORDER[classify_citation_channel(x[1])],
         x[1].ref_index or 9999,
         x[1].bounds[1] if x[1].bounds else 0,
       ),
     )
-
-    for idx, citation in pending:
-      if max_refs > 0 and attempts >= limit:
-        break
-
-      if citation.url:
-        continue
-
-      print(
-        f"[问答] 解析引用 {attempts + 1}/{limit}: "
-        f"#{citation.ref_index or '?'} {citation.title[:36]!r}"
-      )
-      if should_skip_douyin_url_resolve(citation, p):
-        print(
-          f"[问答] 跳过抖音引用 URL 逐条点击（保留条目）: "
-          f"#{citation.ref_index or '?'} {citation.title[:40]!r}"
-        )
-        continue
-      if not _ensure_citation_visible(device, citation, p):
-        print(f"[问答] 引用不可见，跳过 URL: {citation.title[:40]!r}")
-        continue
-
-      url = _resolve_one_citation_url(
+    if tech_pending:
+      print(f"[问答] 技术逐条解析 {len(tech_pending)} 条（web/douyin 渠道）")
+      attempts = _resolve_pending_pass(
         device,
-        citation,
+        citations,
+        tech_pending,
         nav=nav,
         profile=p,
         serial=serial,
-        method=click_method,
+        click_method=click_method,
         stream=stream,
         recent_logcat_urls=recent_logcat_urls,
+        pass_label="技术逐条",
+        channels={"web", "douyin"},
+        brute_force=False,
+        apply_skip_policy=True,
+        max_refs=limit,
+        attempts_so_far=attempts,
+        resolved_by_index=resolved_by_index,
       )
 
-      if url:
-        citation.url = url
-        resolved_by_index[idx] = url
-        print(f"[问答] 引用 URL ({click_method}): {citation.ref_index or '?'} -> {url[:80]}")
-      else:
-        print(f"[问答] 未解析到 URL: {citation.title[:40]!r}")
-
-      attempts += 1
+    pending = _pending_sorted(citations)
+    if pending:
+      print(f"[问答] 笨办法补齐 {len(pending)} 条剩余无 URL 引用")
+      _resolve_pending_pass(
+        device,
+        citations,
+        pending,
+        nav=nav,
+        profile=p,
+        serial=serial,
+        click_method=click_method,
+        stream=stream,
+        recent_logcat_urls=recent_logcat_urls,
+        pass_label="笨办法",
+        channels=None,
+        brute_force=True,
+        apply_skip_policy=False,
+        max_refs=limit,
+        attempts_so_far=attempts,
+        resolved_by_index=resolved_by_index,
+      )
   finally:
     stream.stop()
 
