@@ -24,6 +24,7 @@ from app.modules.chat_ui_heuristics import (
   display_wh,
   get_query_anchor_bounds,
   iter_text_view_like_nodes,
+  chat_prompt_conflicts,
   norm_prompt_keys,
   read_visible_user_prompt,
   verify_chat_prompt,
@@ -367,13 +368,16 @@ class DoubaoQaCapture:
     return bool(visible and len(visible) >= 8)
 
   def _ensure_expected_chat(self, prompt: str, *, phase: str) -> bool:
-    if verify_chat_prompt(self.d, prompt, profile=self.p):
+    """会话校验（宽松）：仅当屏上出现另一条不同提问时判定错位。
+
+    读不到用户气泡（问题已滚出屏幕）视为正常，不中止。
+    """
+    conflict, visible = chat_prompt_conflicts(self.d, prompt, profile=self.p)
+    if not conflict:
       return True
-    visible = read_visible_user_prompt(self.d, profile=self.p)
-    shown = visible[:48] if visible else "(无用户气泡)"
     print(
       f"[问答] 会话错位({phase})：期望 {prompt[:48]!r}，"
-      f"屏上 {shown!r}"
+      f"屏上 {visible[:48]!r}（疑似落入历史会话）"
     )
     return False
 

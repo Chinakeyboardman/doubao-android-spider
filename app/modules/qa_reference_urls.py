@@ -846,17 +846,23 @@ def _chat_context_ok(
   profile: GestureProfile,
   tag: str,
 ) -> bool:
+  """
+  URL 解析期会话校验（宽松）：仅当屏上出现另一条不同提问时判定错位。
+
+  引用解析途中问题气泡本就滚出屏幕，读不到用户气泡不算证据，避免误杀空转。
+  """
   if not (expected_prompt or "").strip():
     return True
-  from app.modules.chat_ui_heuristics import read_visible_user_prompt, prompt_matches_chat
+  from app.modules.chat_ui_heuristics import chat_prompt_conflicts
 
-  visible = read_visible_user_prompt(device, profile=profile)
-  if prompt_matches_chat(expected_prompt, visible):
+  conflict, visible = chat_prompt_conflicts(
+    device, expected_prompt, profile=profile,
+  )
+  if not conflict:
     return True
-  shown = visible[:40] if visible else "(无用户气泡)"
   print(
     f"[问答] URL解析会话错位({tag})：期望 {expected_prompt[:40]!r}，"
-    f"屏上 {shown!r}"
+    f"屏上 {visible[:40]!r}（疑似落入历史会话）"
   )
   return False
 

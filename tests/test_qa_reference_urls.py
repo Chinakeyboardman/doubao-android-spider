@@ -3,7 +3,11 @@
 
 from __future__ import annotations
 
-from app.modules.chat_ui_heuristics import prompt_matches_chat
+from app.modules.chat_ui_heuristics import (
+  chat_prompt_conflicts,
+  prompt_matches_chat,
+  verify_chat_prompt,
+)
 from app.modules.qa_reference_urls import (
   apply_batch_douyin_urls,
   classify_citation_channel,
@@ -244,6 +248,32 @@ def test_prompt_matches_chat():
   assert prompt_matches_chat(exp, "AI折叠手机2026年推荐几款")
   assert not prompt_matches_chat(exp, "聊聊新话题")
   assert not prompt_matches_chat(exp, "AI功能强大的折叠屏手机推荐哪款？")
+
+
+class _FakeDevice:
+  """最小化设备：dump_hierarchy 返回指定 XML（空=当前屏读不到气泡）。"""
+
+  def __init__(self, xml: str = ""):
+    self.info = {"displayWidth": 1080, "displayHeight": 2400}
+    self._xml = xml
+
+  def dump_hierarchy(self, compressed: bool = False) -> str:
+    return self._xml
+
+
+def test_verify_chat_prompt_tolerates_missing_bubble():
+  """回归：问题已滚出屏幕（读不到用户气泡）不应判定会话错位。"""
+  dev = _FakeDevice("")
+  assert verify_chat_prompt(dev, "AI折叠手机2026年推荐几款？")
+  conflict, visible = chat_prompt_conflicts(dev, "AI折叠手机2026年推荐几款？")
+  assert conflict is False
+  assert visible == ""
+
+
+def test_verify_chat_prompt_empty_expected_passes():
+  dev = _FakeDevice("")
+  assert verify_chat_prompt(dev, "")
+  assert chat_prompt_conflicts(dev, "")[0] is False
 
 
 def test_classify_citation_channel():

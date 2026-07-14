@@ -162,19 +162,45 @@ def prompt_matches_chat(expected: str, visible: str) -> bool:
     return False
 
 
+def chat_prompt_conflicts(
+    device: Any,
+    expected_prompt: str,
+    *,
+    profile: GestureProfile | None = None,
+) -> tuple[bool, str]:
+    """
+    判断当前聊天页是否与目标会话「明确冲突」。
+
+    仅当屏上读到**另一条非空且不匹配**的用户提问时判定冲突（阳性证据）；
+    读不到用户气泡（问题已滚出屏幕）不算冲突，避免误杀。
+    返回 (是否冲突, 屏上可见提问)。
+    """
+    if not (expected_prompt or "").strip():
+        return False, ""
+    visible = read_visible_user_prompt(device, profile=profile)
+    if not visible:
+        return False, ""
+    if prompt_matches_chat(expected_prompt, visible):
+        return False, visible
+    return True, visible
+
+
 def verify_chat_prompt(
     device: Any,
     expected_prompt: str,
     *,
     profile: GestureProfile | None = None,
 ) -> bool:
-    """校验当前聊天页是否为本次采集目标会话。"""
+    """
+    校验当前聊天页是否为本次采集目标会话（宽松：无冲突即通过）。
+
+    - 屏上出现另一条不同提问 → 判定不在目标会话（返回 False）。
+    - 读不到用户气泡（已滚出屏）→ 视为正常（返回 True），避免误杀。
+    """
     if not (expected_prompt or "").strip():
         return True
-    visible = read_visible_user_prompt(device, profile=profile)
-    if not visible:
-        return False
-    return prompt_matches_chat(expected_prompt, visible)
+    conflict, _ = chat_prompt_conflicts(device, expected_prompt, profile=profile)
+    return not conflict
 
 
 def iter_text_view_like_nodes(device: Any) -> Iterator[Any]:
