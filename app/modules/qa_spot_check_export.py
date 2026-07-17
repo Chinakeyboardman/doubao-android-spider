@@ -82,6 +82,7 @@ _DOMAIN_SOURCE_MAP: dict[str, str] = {
   "ifeng.com": "凤凰网",
   "toutiao.com": "今日头条",
   "iesdouyin.com": "抖音",
+  "douyin.com": "抖音",
   "phonearena.com": "PhoneArena",
   "chinaaet.cn": "电子技术应用",
 }
@@ -403,6 +404,10 @@ def _normalize_citation(ref: Citation | dict[str, Any]) -> Citation:
     desc=str(ref.get("desc") or ""),
     ref_index=int(ref.get("ref_index") or 0),
     group=str(ref.get("group") or ""),
+    url_reachable=ref.get("url_reachable"),
+    url_http_status=int(ref.get("url_http_status") or 0),
+    url_check_status=str(ref.get("url_check_status") or ""),
+    url_check_note=str(ref.get("url_check_note") or ""),
   )
 
 
@@ -422,6 +427,10 @@ def citations_to_spot_check_list(refs: list[Citation | dict[str, Any]]) -> list[
         "title": title or ref.title,
         "urlNum": ref.ref_index if ref.ref_index > 0 else i,
         "webUrl": ref.url,
+        "webUrlReachable": ref.url_reachable,
+        "urlCheckStatus": ref.url_check_status or "",
+        "urlHttpStatus": ref.url_http_status or None,
+        "urlCheckNote": ref.url_check_note or "",
       }
     )
   return out
@@ -443,6 +452,15 @@ def quality_grade_from_report(report: QaQualityReport) -> str:
   return "F"
 
 
+def build_detail_id_index(
+  rows: list[SignedPromptRow],
+  *,
+  base: int = 900001,
+) -> dict[str, int]:
+  """为去重后的签单行生成稳定 detail_id（多机并发避免 state 竞争）。"""
+  return {row.keyword_id: base + idx for idx, row in enumerate(rows)}
+
+
 def qa_record_to_spot_check_row(
   signed: SignedPromptRow,
   *,
@@ -452,6 +470,7 @@ def qa_record_to_spot_check_row(
   quality_report: QaQualityReport,
   meta: SpotCheckBatchMeta,
   captured_at: datetime | None = None,
+  detail_id: int | None = None,
 ) -> SpotCheckRow:
   """将签单行 + 采集结果映射为抽检明细行。"""
   ts = captured_at or datetime.now()
@@ -459,13 +478,14 @@ def qa_record_to_spot_check_row(
   thinking_body = extract_thinking_narrative(thinking)
   citations_json = citations_to_spot_check_json(thinking_references)
 
-  detail_id = meta.next_detail_id
-  meta.next_detail_id += 1
+  detail_id_val = detail_id if detail_id is not None else meta.next_detail_id
+  if detail_id is None:
+    meta.next_detail_id += 1
 
   return SpotCheckRow(
     project_name=signed.project_name,
     check_date=meta.check_date or ts.strftime("%Y-%m-%d"),
-    detail_id=detail_id,
+    detail_id=detail_id_val,
     detail_code=make_detail_code(signed.keyword_id),
     task_code=meta.task_code,
     batch_code="",
@@ -503,6 +523,47 @@ def load_completed_keyword_ids(csv_path: str) -> set[str]:
       if kid:
         done.add(kid)
   return done
+
+
+def count_unique_completed_keywords(csv_path: str) -> int:
+  """抽检进度：按唯一关键词编号计数（不以 CSV 行数为准）。"""
+  return len(load_completed_keyword_ids(csv_path))
+
+
+def spot_check_csv_stats(csv_path: str) -> tuple[int, int]:
+  """返回 (唯一已完成 keyword 数, CSV 数据行数)。"""
+  if not os.path.isfile(csv_path):
+    return 0, 0
+  kids: set[str] = set()
+  rows = 0
+  with open(csv_path, encoding="utf-8-sig", newline="") as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+      rows += 1
+      kid = (row.get("关键词编号") or "").strip()
+      if kid:
+        kids.add(kid)
+  return len(kids), rows
+
+
+def load_failure_counts(failures_path: str) -> dict[str, int]:
+  """从 failures.jsonl 统计各 keyword_id 失败次数（用于认领时优先新任务）。"""
+  if not failures_path or not os.path.isfile(failures_path):
+    return {}
+  counts: dict[str, int] = {}
+  with open(failures_path, encoding="utf-8") as f:
+    for line in f:
+      line = line.strip()
+      if not line:
+        continue
+      try:
+        obj = json.loads(line)
+      except json.JSONDecodeError:
+        continue
+      kid = str(obj.get("keyword_id") or "").strip()
+      if kid:
+        counts[kid] = counts.get(kid, 0) + 1
+  return counts
 
 
 def ensure_csv_header(csv_path: str) -> None:
@@ -609,7 +670,7 @@ def _row_should_purge(
         return None
     return "引用条数为 0"
   if url_count <= 0:
-    return "引用无有效 webUrl"
+    return None
   if ref_count > 0 and url_count < ref_count * min_url_resolve_ratio:
     return f"URL 不足 {url_count}/{ref_count}（低于 {min_url_resolve_ratio:.0%}）"
   return None

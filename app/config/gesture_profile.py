@@ -201,6 +201,8 @@ class GestureProfile:
     fc_card_top_visible_y: float = 0.25
     fc_title_pixel_min_y: int = 200
     fc_title_image_max_dy: int = 200
+    # 豆包卡在 WebActivity 等：连续 N 次软恢复失败后 force-stop 冷启动
+    fc_app_hard_restart_stuck: int = 3
 
     # ── qa_capture: 问答归档几何启发式 ──
     qa_user_bubble_cx_min: float = 0.55
@@ -221,6 +223,13 @@ class GestureProfile:
     qa_shot_scroll_duration: float = 0.28
     qa_shot_post_swipe_sleep: float = 0.55
     qa_shot_quiet_rounds: int = 2
+    # 长截图：message_list 内单次下滑比例（旧逻辑约 0.50，过大易漏段）
+    qa_shot_list_swipe_frac: float = 0.30
+    # 相对可见内容区 ROI 的最大下滑像素比例（保证帧间重叠）
+    qa_shot_scroll_advance_frac: float = 0.45
+    qa_shot_list_swipe_duration: float = 0.38
+    # 相邻 shot 重叠低于该比例时打日志（约为 ROI 高度）
+    qa_shot_min_overlap_frac: float = 0.28
     qa_think_panel_scroll_rounds: int = 12
     qa_expand_collect_max_rounds: int = 20
     qa_expand_refs_wait: float = 3.0
@@ -229,6 +238,19 @@ class GestureProfile:
     qa_resolve_url_wait: float = 3.5
     qa_resolve_url_post_back_sleep: float = 0.5
     qa_resolve_url_max_backs: int = 5
+    # URL 解析整阶段 wall-clock 预算（秒）；0=不限制
+    qa_resolve_url_phase_budget_sec: float = 480.0
+    # 单条任务内会话恢复（含 hard_restart）次数上限；0=不限制
+    qa_resolve_recover_max_per_task: int = 3
+    # URL 解析期会话守卫：False=完全不做错位校验/恢复（60710 轻量模式）
+    qa_resolve_session_guard: bool = True
+    # 判定错位前二次确认（隔 reconfirm_sleep 再读一次），消除瞬时误判
+    qa_resolve_session_guard_reconfirm: bool = True
+    qa_resolve_session_guard_reconfirm_sleep: float = 0.6
+    # True=快速逐条后不再跑笨办法（配合 allow_partial 提速）
+    qa_resolve_skip_brute_pass: bool = False
+    # True=60710 单遍：逐条 logcat→dumpsys→lite_back，无快速/笨办法分两趟
+    qa_resolve_simple_mode: bool = False
     qa_resolve_url_max_refs: int = 0
     qa_resolve_citation_max_swipes: int = 12
     qa_resolve_prepare_list_passes: int = 8
@@ -237,6 +259,27 @@ class GestureProfile:
     qa_resolve_batch_douyin: bool = True
     qa_resolve_batch_douyin_timeout: float = 6.0
     qa_resolve_skip_douyin_per_click: bool = True
+    # vivo 等：点抖音引用时系统弹「是否打开 App」，需点「打开」才能 logcat 抓 aweme id
+    qa_resolve_accept_app_jump: bool = False
+    # 抖音 Handoff：深链优先、状态机超时、scheme 列表
+    qa_douyin_handoff_timeout: float = 20.0
+    qa_douyin_deeplink_first: bool = True
+    qa_douyin_deeplink_schemes: tuple[str, ...] = ("snssdk1128", "snssdk1180")
+    qa_douyin_ensure_login_before_batch: bool = True
+    # PC Web 辅助：logcat 抽到 aweme_id 后 HTTP 验证再写 iesdouyin（可跳过手机开抖音）
+    qa_douyin_web_validate: bool = True
+    qa_douyin_web_validate_interval: float = 0.8
+    qa_douyin_web_validate_fallback: bool = True
+    qa_douyin_web_url_formats: tuple[str, ...] = (
+        "douyin_jingxuan_modal",
+        "douyin_video",
+        "iesdouyin_share",
+        "iesdouyin_share_query",
+    )
+    # 笨办法解析到 URL 后 HTTP 探测可达性（404 等单独记录，不算系统错误）
+    qa_url_reachability_check: bool = True
+    qa_url_reachability_timeout: float = 10.0
+    qa_url_reachability_brute_only: bool = True
     qa_logcat_stream_settle: float = 0.15
     qa_logcat_stream_poll_interval: float = 0.25
     # URL 解析：引用条目视为「在屏内」的垂直 band（比例，避开状态栏/输入栏）

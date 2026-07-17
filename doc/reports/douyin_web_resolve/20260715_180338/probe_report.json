@@ -1,0 +1,107 @@
+{
+  "timestamp": "20260715_180338",
+  "device_id_query": "",
+  "min_interval_s": 0.8,
+  "aweme_probes": [
+    {
+      "aweme_id": "7548775039182294330",
+      "share_url": "https://www.iesdouyin.com/share/video/7548775039182294330",
+      "canonical_url": "https://www.douyin.com/video/7548775039182294330",
+      "short_url": "",
+      "verified": true,
+      "status": "ok",
+      "http_status": 302,
+      "note": "desktop 302 验证通过",
+      "redirect_chain": [
+        "https://www.iesdouyin.com/share/video/7548775039182294330",
+        "https://www.douyin.com/video/7548775039182294330?previous_page=app_code_link"
+      ],
+      "captcha_suspected": false,
+      "strategy": "desktop_redirect",
+      "elapsed_s": 0.26,
+      "share_url_built": "https://www.iesdouyin.com/share/video/7548775039182294330"
+    },
+    {
+      "aweme_id": "7650085520299273595",
+      "share_url": "https://www.iesdouyin.com/share/video/7650085520299273595",
+      "canonical_url": "https://www.douyin.com/video/7650085520299273595",
+      "short_url": "",
+      "verified": true,
+      "status": "ok",
+      "http_status": 302,
+      "note": "desktop 302 验证通过",
+      "redirect_chain": [
+        "https://www.iesdouyin.com/share/video/7650085520299273595",
+        "https://www.douyin.com/video/7650085520299273595?previous_page=app_code_link"
+      ],
+      "captcha_suspected": false,
+      "strategy": "desktop_redirect",
+      "elapsed_s": 0.33,
+      "share_url_built": "https://www.iesdouyin.com/share/video/7650085520299273595"
+    },
+    {
+      "aweme_id": "7356065400192355620",
+      "share_url": "https://www.iesdouyin.com/share/video/7356065400192355620",
+      "canonical_url": "https://www.douyin.com/video/7356065400192355620",
+      "short_url": "",
+      "verified": true,
+      "status": "ok",
+      "http_status": 302,
+      "note": "desktop 302 验证通过",
+      "redirect_chain": [
+        "https://www.iesdouyin.com/share/video/7356065400192355620",
+        "https://www.douyin.com/video/7356065400192355620?previous_page=app_code_link"
+      ],
+      "captcha_suspected": false,
+      "strategy": "desktop_redirect",
+      "elapsed_s": 0.34,
+      "share_url_built": "https://www.iesdouyin.com/share/video/7356065400192355620"
+    },
+    {
+      "aweme_id": "6883418578486349070",
+      "share_url": "https://www.iesdouyin.com/share/video/6883418578486349070",
+      "canonical_url": "https://www.douyin.com/video/6883418578486349070",
+      "short_url": "",
+      "verified": true,
+      "status": "ok",
+      "http_status": 302,
+      "note": "desktop 302 验证通过",
+      "redirect_chain": [
+        "https://www.iesdouyin.com/share/video/6883418578486349070",
+        "https://www.douyin.com/video/6883418578486349070?previous_page=app_code_link"
+      ],
+      "captcha_suspected": false,
+      "strategy": "desktop_redirect",
+      "elapsed_s": 0.24,
+      "share_url_built": "https://www.iesdouyin.com/share/video/6883418578486349070"
+    }
+  ],
+  "short_probes": [
+    {
+      "aweme_id": "6883418578486349070",
+      "share_url": "https://www.iesdouyin.com/share/video/6883418578486349070",
+      "canonical_url": "https://www.douyin.com/video/6883418578486349070",
+      "short_url": "https://v.douyin.com/JPa1xhq/",
+      "verified": true,
+      "status": "ok",
+      "http_status": 200,
+      "note": "短链展开成功",
+      "redirect_chain": [
+        "https://v.douyin.com/JPa1xhq/",
+        "https://www.iesdouyin.com/share/video/6883418578486349070/?app=aweme&mid=6883418927515421454&region=CN&titleType=title&u_code=0&utm_campaign=client_share&utm_medium=android&utm_source=copy_link"
+      ],
+      "captcha_suspected": false,
+      "strategy": "expand_short_link",
+      "elapsed_s": 1.28,
+      "input_short_url": "https://v.douyin.com/JPa1xhq/"
+    }
+  ],
+  "verified_count": 4,
+  "overall_ok": true,
+  "summary_notes": [
+    "aweme_id 验证 4/4 通过",
+    "desktop 302 → douyin.com/video/{id} 为推荐验证路径",
+    "v.douyin.com 无法从 aweme_id 正向生成（仅反向展开可行）",
+    "验证通过后可固化到 qa_reference_urls（qa_douyin_web_validate）"
+  ]
+}

@@ -52,12 +52,17 @@ adb_cmd shell getprop ro.product.brand
 adb_cmd shell getprop ro.product.model
 adb_cmd shell getprop ro.build.version.release
 
-PKG="com.larus.nova"
-if adb_cmd shell pm list packages "$PKG" | grep -q "$PKG"; then
-  echo "✅ 已安装豆包 ($PKG)"
-else
-  echo "⚠️  未检测到豆包 ($PKG)，请先安装并登录豆包 APP"
+echo ""
+echo "==> 豆包 APK 版本"
+SERIAL_ARG=()
+if [[ -n "$SERIAL" ]]; then
+  SERIAL_ARG=(-s "$SERIAL")
 fi
+"${ROOT}/.venv/bin/python" "${ROOT}/scripts/doubao_apk.py" list "${SERIAL_ARG[@]}" || true
+echo ""
+echo "安装/切换版本示例:"
+echo "  .venv/bin/python scripts/doubao_apk.py scan"
+echo "  .venv/bin/python scripts/doubao_apk.py install --version 14.1.0 ${SERIAL:+-s $SERIAL}"
 
 echo ""
 echo "==> 初始化 uiautomator2（向手机安装 atx-agent）"

@@ -117,6 +117,11 @@ class Citation:
   bounds: list[int] = field(default_factory=list)
   ref_index: int = 0
   group: str = ""
+  # URL 可达性（笨办法/探测后写入；404 等属豆包/站点问题，非采集系统错误）
+  url_reachable: bool | None = None
+  url_http_status: int = 0
+  url_check_status: str = ""
+  url_check_note: str = ""
 
 
 @dataclass

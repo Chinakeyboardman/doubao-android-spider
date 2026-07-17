@@ -14,9 +14,9 @@ import logging
 import os
 import shutil
 import time
-from dataclasses import replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from PIL import Image
 
@@ -124,6 +124,201 @@ def _mean_abs_diff(a: Image.Image, b: Image.Image) -> float:
     return sum(abs(p1[i] - p2[i]) for i in range(n)) / n
 
 
+OverlapDiagnosisKind = Literal[
+  "ok", "near_duplicate", "gap_risk", "weak_match", "segment_boundary",
+]
+
+
+@dataclass(frozen=True)
+class OverlapEstimate:
+    """相邻帧垂直重叠估计与诊断（供离线重拼与采集告警）。"""
+
+    overlap_px: int
+    overlap_frac: float
+    match_score: float
+    legacy_overlap_px: int
+    legacy_match_score: float
+    diagnosis: OverlapDiagnosisKind
+    above_frame: str = ""
+    below_frame: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _align_pair_width(
+    image_above: Image.Image,
+    image_below: Image.Image,
+) -> tuple[Image.Image, Image.Image, int, int]:
+    a = image_above.convert("RGB")
+    b = image_below.convert("RGB")
+    w1, h1 = a.size
+    w2, h2 = b.size
+    w = min(w1, w2)
+    if w <= 0:
+        return a, b, h1, h2
+    if w1 != w:
+        a = a.resize((w, max(1, int(h1 * w / w1))), Image.Resampling.BILINEAR)
+        h1 = a.size[1]
+    if w2 != w:
+        b = b.resize((w, max(1, int(h2 * w / w2))), Image.Resampling.BILINEAR)
+        h2 = b.size[1]
+    return a, b, h1, h2
+
+
+def _strip_pair_mae(
+    image_above: Image.Image,
+    image_below: Image.Image,
+    overlap_px: int,
+    *,
+    sample_w: int = 96,
+    sample_h: int = 96,
+) -> float:
+    """比较上一帧底条与下一帧顶条在指定重叠高度下的均差。"""
+    a, b, h1, h2 = _align_pair_width(image_above, image_below)
+    oh = max(1, min(overlap_px, h1, h2))
+    w = a.size[0]
+    strip_top = a.crop((0, h1 - oh, w, h1))
+    strip_bot = b.crop((0, 0, w, oh))
+    return _mean_abs_diff(strip_top, strip_bot)
+
+
+def _search_vertical_overlap(
+    image_above: Image.Image,
+    image_below: Image.Image,
+    *,
+    min_overlap: int,
+    max_overlap_px: int,
+    step_px: int,
+) -> tuple[int, float]:
+    a, b, h1, h2 = _align_pair_width(image_above, image_below)
+    max_oh = max(min_overlap, min(max_overlap_px, h1, h2))
+    best_oh = min_overlap
+    best_score = 1e9
+    for oh in range(min_overlap, max_oh + 1, step_px):
+        score = _strip_pair_mae(a, b, oh)
+        if score < best_score:
+            best_score = score
+            best_oh = oh
+    return best_oh, best_score
+
+
+def _classify_overlap_diagnosis(
+    overlap_px: int,
+    match_score: float,
+    frame_h: int,
+    *,
+    gap_frac: float = 0.12,
+    near_dup_frac: float = 0.62,
+    near_dup_score: float = 12.0,
+    weak_score: float = 28.0,
+) -> OverlapDiagnosisKind:
+    frac = overlap_px / max(frame_h, 1)
+    if match_score > weak_score:
+        return "weak_match"
+    if frac >= near_dup_frac and match_score <= near_dup_score:
+        return "near_duplicate"
+    if frac <= gap_frac:
+        return "gap_risk"
+    return "ok"
+
+
+def estimate_vertical_overlap_v2(
+    image_above: Image.Image,
+    image_below: Image.Image,
+    *,
+    min_overlap: int = 16,
+    legacy_max_overlap_frac: float = 0.48,
+    extended_max_overlap_frac: float = 0.92,
+    step_px: int = 4,
+    bad_diff_threshold: float = 28.0,
+    fallback_frac: float = 0.18,
+    above_frame: str = "",
+    below_frame: str = "",
+) -> OverlapEstimate:
+    """
+    扩展重叠搜索（最高约 92% 屏高），修复近重复帧在旧算法下被估成 16px 的问题。
+
+    旧算法仅在 ≤48% 屏高内搜索；当相邻帧几乎没滑动时，真实重叠常 >65%，
+    旧算法匹配失败后回退 min_overlap，拼接会把同一段正文叠两次。
+    """
+    try:
+        _a, _b, h1, h2 = _align_pair_width(image_above, image_below)
+        frame_h = min(h1, h2)
+        if frame_h <= 0:
+            return OverlapEstimate(
+                overlap_px=0,
+                overlap_frac=0.0,
+                match_score=999.0,
+                legacy_overlap_px=0,
+                legacy_match_score=999.0,
+                diagnosis="weak_match",
+                above_frame=above_frame,
+                below_frame=below_frame,
+            )
+
+        legacy_oh, legacy_score = _search_vertical_overlap(
+            image_above,
+            image_below,
+            min_overlap=min_overlap,
+            max_overlap_px=int(frame_h * legacy_max_overlap_frac),
+            step_px=3,
+        )
+        if legacy_score > bad_diff_threshold:
+            legacy_oh = max(
+                min_overlap,
+                min(int(frame_h * fallback_frac), frame_h // 2),
+            )
+            legacy_score = _strip_pair_mae(image_above, image_below, legacy_oh)
+
+        ext_oh, ext_score = _search_vertical_overlap(
+            image_above,
+            image_below,
+            min_overlap=min_overlap,
+            max_overlap_px=int(frame_h * extended_max_overlap_frac),
+            step_px=step_px,
+        )
+
+        use_extended = False
+        if ext_score + 0.5 < legacy_score:
+            use_extended = True
+        elif (
+            legacy_oh <= min_overlap + step_px
+            and ext_score <= bad_diff_threshold
+            and ext_oh > legacy_oh + 80
+        ):
+            use_extended = True
+
+        chosen_oh = ext_oh if use_extended else legacy_oh
+        chosen_score = ext_score if use_extended else legacy_score
+        diagnosis = _classify_overlap_diagnosis(chosen_oh, chosen_score, frame_h)
+
+        return OverlapEstimate(
+            overlap_px=chosen_oh,
+            overlap_frac=round(chosen_oh / frame_h, 4),
+            match_score=round(chosen_score, 3),
+            legacy_overlap_px=legacy_oh,
+            legacy_match_score=round(legacy_score, 3),
+            diagnosis=diagnosis,
+            above_frame=above_frame,
+            below_frame=below_frame,
+        )
+    except Exception as e:
+        log.warning("v2 重叠估计失败，回退 legacy: %s", e)
+        legacy_oh = estimate_vertical_overlap_px(image_above, image_below)
+        mh = min(image_above.height, image_below.height)
+        return OverlapEstimate(
+            overlap_px=legacy_oh,
+            overlap_frac=round(legacy_oh / max(mh, 1), 4),
+            match_score=999.0,
+            legacy_overlap_px=legacy_oh,
+            legacy_match_score=999.0,
+            diagnosis="weak_match",
+            above_frame=above_frame,
+            below_frame=below_frame,
+        )
+
+
 def estimate_vertical_overlap_px(
     image_above: Image.Image,
     image_below: Image.Image,
@@ -186,32 +381,138 @@ def estimate_vertical_overlap_px(
         return max(min_overlap, int(mh * fallback_frac))
 
 
+def _paste_below_with_overlap(
+    out: Image.Image,
+    nxt: Image.Image,
+    overlap_px: int,
+) -> Image.Image:
+    nxt = nxt.convert("RGB")
+    if nxt.width != out.width:
+        nxt = nxt.resize(
+            (out.width, max(1, int(nxt.height * out.width / nxt.width))),
+            Image.Resampling.BILINEAR,
+        )
+    oh = max(0, min(overlap_px, nxt.height - 1, out.height))
+    strip = nxt.crop((0, oh, nxt.width, nxt.height))
+    new_h = out.height + strip.height
+    canvas = Image.new("RGB", (out.width, new_h), (255, 255, 255))
+    canvas.paste(out, (0, 0))
+    canvas.paste(strip, (0, out.height))
+    return canvas
+
+
 def stitch_content_strips_vertical(crops: list[Image.Image]) -> Image.Image:
     """
     将多张已裁好的「仅内容区」竖条，按顺序自上而下拼接为一张长图。
 
-    相邻两张之间用 estimate_vertical_overlap_px 去重后再纵向拼接。
+    默认使用 v2 重叠估计（扩展搜索至约 92% 屏高，修复近重复帧拼接重复）。
+    """
+    stitched, _ = stitch_content_strips_vertical_v2(crops, use_v2_overlap=True)
+    return stitched
+
+
+def stitch_content_strips_vertical_v2(
+    crops: list[Image.Image],
+    *,
+    use_v2_overlap: bool = True,
+    frame_labels: list[str] | None = None,
+    segment_breaks: set[int] | frozenset[int] | None = None,
+) -> tuple[Image.Image, list[OverlapEstimate]]:
+    """
+    拼接内容区竖条；默认用 v2 重叠估计，并返回逐对诊断。
+
+    :param use_v2_overlap: False 时与 stitch_content_strips_vertical 旧行为一致。
+    :param frame_labels: 与 crops 等长的帧名，写入诊断便于肉眼对照。
+    :param segment_breaks: 帧对下标（0 表示 crops[0] 与 crops[1] 之间）强制零重叠，
+        用于回答段与思考段等非连续滚动边界，避免假重叠或整段重复。
     """
     if not crops:
         raise ValueError("crops 不能为空")
+    labels = frame_labels or [f"frame_{i + 1:02d}" for i in range(len(crops))]
+    if len(labels) < len(crops):
+        labels = labels + [f"frame_{i + 1:02d}" for i in range(len(labels), len(crops))]
+    breaks = segment_breaks or frozenset()
+
+    diagnoses: list[OverlapEstimate] = []
     try:
         out = crops[0].convert("RGB").copy()
-        for nxt in crops[1:]:
-            nxt = nxt.convert("RGB")
-            if nxt.width != out.width:
-                nxt = nxt.resize((out.width, max(1, int(nxt.height * out.width / nxt.width))), Image.Resampling.BILINEAR)
-            oh = estimate_vertical_overlap_px(out, nxt)
-            oh = max(0, min(oh, nxt.height - 1, out.height))
-            strip = nxt.crop((0, oh, nxt.width, nxt.height))
-            new_h = out.height + strip.height
-            canvas = Image.new("RGB", (out.width, new_h), (255, 255, 255))
-            canvas.paste(out, (0, 0))
-            canvas.paste(strip, (0, out.height))
-            out = canvas
-        return out
+        for idx, nxt in enumerate(crops[1:], start=1):
+            pair_idx = idx - 1
+            if pair_idx in breaks:
+                oh = 0
+                frame_h = min(out.height, nxt.height)
+                diagnoses.append(
+                    OverlapEstimate(
+                        overlap_px=0,
+                        overlap_frac=0.0,
+                        match_score=0.0,
+                        legacy_overlap_px=0,
+                        legacy_match_score=0.0,
+                        diagnosis="segment_boundary",
+                        above_frame=labels[idx - 1],
+                        below_frame=labels[idx],
+                    )
+                )
+            elif use_v2_overlap:
+                est = estimate_vertical_overlap_v2(
+                    out,
+                    nxt,
+                    above_frame=labels[idx - 1],
+                    below_frame=labels[idx],
+                )
+                oh = est.overlap_px
+                diagnoses.append(est)
+            else:
+                oh = estimate_vertical_overlap_px(out, nxt)
+                frame_h = min(out.height, nxt.height)
+                diagnoses.append(
+                    OverlapEstimate(
+                        overlap_px=oh,
+                        overlap_frac=round(oh / max(frame_h, 1), 4),
+                        match_score=0.0,
+                        legacy_overlap_px=oh,
+                        legacy_match_score=0.0,
+                        diagnosis="ok",
+                        above_frame=labels[idx - 1],
+                        below_frame=labels[idx],
+                    )
+                )
+            out = _paste_below_with_overlap(out, nxt, oh)
+        return out, diagnoses
     except Exception as e:
         log.exception("拼接长图失败: %s", e)
         raise
+
+
+def stitch_qa_shot_segments(
+    answer_crops: list[Image.Image],
+    think_crops: list[Image.Image],
+    *,
+    answer_labels: list[str] | None = None,
+    think_labels: list[str] | None = None,
+) -> tuple[Image.Image, Image.Image | None, list[OverlapEstimate]]:
+    """
+    问答长图分段拼接：回答段与思考/引用段各自按连续滚动拼接。
+
+    full.png 仅含回答段（问题→正文→复制栏），避免与思考段假重叠导致上下两块重复。
+    思考段单独拼为第二张图（可为 None）。
+    """
+    if not answer_crops:
+        raise ValueError("answer_crops 不能为空")
+
+    answer_img, answer_diag = stitch_content_strips_vertical_v2(
+        answer_crops,
+        frame_labels=answer_labels,
+    )
+    think_img: Image.Image | None = None
+    all_diag = list(answer_diag)
+    if think_crops:
+        think_img, think_diag = stitch_content_strips_vertical_v2(
+            think_crops,
+            frame_labels=think_labels,
+        )
+        all_diag.extend(think_diag)
+    return answer_img, think_img, all_diag
 
 
 def capture_detail_content_strip_sequence(

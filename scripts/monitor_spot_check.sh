@@ -13,21 +13,29 @@ PID_FILE="${SPOT_CHECK_PID_FILE:-${VAR_DIR}/spot_check.pid}"
 MONITOR_LOG="${SPOT_CHECK_MONITOR_LOG:-${VAR_DIR}/spot_check_monitor.log}"
 
 count_done() {
-  CSV="$CSV" "$ROOT/.venv/bin/python" - <<'PY' 2>/dev/null || echo 0
-import csv
+  ROOT="$ROOT" CSV="$CSV" "$ROOT/.venv/bin/python" - <<'PY' 2>/dev/null || echo 0
 import os
+import sys
 from pathlib import Path
-p = Path(os.environ["CSV"])
-if not p.exists():
-    print(0)
-    raise SystemExit
-with p.open(encoding="utf-8-sig", newline="") as f:
-    n = sum(1 for _ in csv.reader(f))
-print(max(0, n - 1))
+
+sys.path.insert(0, os.environ["ROOT"])
+from app.modules.qa_spot_check_export import count_unique_completed_keywords
+
+p = os.environ["CSV"]
+print(count_unique_completed_keywords(p))
 PY
 }
 
 is_running() {
+  if [[ -n "${SPOT_CHECK_SERIALS:-}" ]]; then
+    local s
+    for s in $SPOT_CHECK_SERIALS; do
+      if pgrep -f "run_qa_spot_check.py.*-s[ =]${s}" >/dev/null 2>&1; then
+        return 0
+      fi
+    done
+    return 1
+  fi
   if pgrep -f "run_qa_spot_check.py" >/dev/null 2>&1; then
     return 0
   fi
@@ -41,9 +49,53 @@ is_running() {
   return 1
 }
 
+worker_status_line() {
+  if [[ -n "${SPOT_CHECK_SERIALS:-}" ]]; then
+    local s n=0 total=0 line=""
+    for s in $SPOT_CHECK_SERIALS; do
+      total=$((total + 1))
+      if pgrep -f "run_qa_spot_check.py.*-s[ =]${s}" >/dev/null 2>&1; then
+        n=$((n + 1))
+        line+=" ${s}:ok"
+      else
+        line+=" ${s}:down"
+      fi
+    done
+    echo "workers ${n}/${total}${line}"
+    return
+  fi
+  if is_running; then
+    if [[ -f "$PID_FILE" ]]; then
+      echo "running pid=$(cat "$PID_FILE")"
+    else
+      echo "running"
+    fi
+  else
+    echo "not running"
+  fi
+}
+
 maybe_restart() {
   local done_n=$1
   if (( done_n >= TOTAL )); then
+    return
+  fi
+  if [[ -n "${SPOT_CHECK_SERIALS:-}" ]]; then
+    local s ts restarted=0
+    for s in $SPOT_CHECK_SERIALS; do
+      if pgrep -f "run_qa_spot_check.py.*-s[ =]${s}" >/dev/null 2>&1; then
+        continue
+      fi
+      ts=$(date '+%Y-%m-%d %H:%M:%S')
+      echo "[$ts] worker 已退出 SN=${s}（完成 ${done_n}/${TOTAL}），单独续跑" | tee -a "$MONITOR_LOG"
+      if [[ -n "${SPOT_CHECK_RESTART_SCRIPT:-}" ]]; then
+        SPOT_CHECK_SERIALS="$s" bash "$SPOT_CHECK_RESTART_SCRIPT" restart >>"$MONITOR_LOG" 2>&1 || true
+        restarted=1
+      fi
+    done
+    if (( restarted )); then
+      sleep 5
+    fi
     return
   fi
   if is_running; then
@@ -63,17 +115,9 @@ maybe_restart() {
 while true; do
   ts=$(date '+%Y-%m-%d %H:%M:%S')
   done_n=$(count_done)
-  if is_running; then
-    if [[ -f "$PID_FILE" ]]; then
-      status="running pid=$(cat "$PID_FILE")"
-    else
-      status="running"
-    fi
-  else
-    status="not running"
-  fi
+  status=$(worker_status_line)
 
-  line="[$ts] $status | CSV完成=${done_n}/${TOTAL}"
+  line="[$ts] $status | 完成=${done_n}/${TOTAL}"
   echo "$line" | tee -a "$MONITOR_LOG"
   tail -3 "$LOG" 2>/dev/null | sed 's/^/  /' | tee -a "$MONITOR_LOG"
 
@@ -82,13 +126,11 @@ while true; do
     break
   fi
 
+  maybe_restart "$done_n"
   if ! is_running; then
     if pgrep -f "run_spot_check_batch.sh" >/dev/null 2>&1; then
       echo "[$ts] 批量启动脚本已在运行，等待" | tee -a "$MONITOR_LOG"
-    else
-      maybe_restart "$done_n"
-    fi
-    if ! is_running; then
+    elif [[ -z "${SPOT_CHECK_SERIALS:-}" ]]; then
       echo "[$ts] 续跑启动失败，$INTERVAL 秒后重试" | tee -a "$MONITOR_LOG"
     fi
   fi

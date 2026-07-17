@@ -31,7 +31,8 @@ from app.modules.chat_ui_heuristics import (
 )
 from app.modules.detail_strip_stitch import (
   crop_fullscreen_to_detail_content,
-  stitch_content_strips_vertical,
+  estimate_vertical_overlap_v2,
+  stitch_qa_shot_segments,
 )
 from app.modules.flow_crawler import FlowCrawler
 from app.modules.qa_hierarchy import (
@@ -65,6 +66,15 @@ BACK_TO_LIST_XPATHS = (
 )
 MODE_MENU_XPATH = DEEP_THINK_TOGGLE_XPATH
 QA_MODE_LABELS: dict[str, str] = {"fast": "快速", "think": "思考"}
+# 输入栏模式芯片可能显示的文案（点开菜单用）；选 fast 时绝不可点「专家」
+QA_MODE_CHIP_TEXTS: tuple[str, ...] = ("快速", "思考", "专家")
+QA_QUOTA_ANSWER_MARKERS: tuple[str, ...] = (
+  "免费额度已用完",
+  "专家模式额度",
+  "专业版功能",
+  "开通豆包专业版",
+  "额度不足",
+)
 REFERENCE_HEADER_XPATHS = (
   '//*[@resource-id="com.larus.nova:id/ll_reference_title"]',
   '//*[@resource-id="com.larus.nova:id/tv_reference_title"]',
@@ -267,7 +277,11 @@ class DoubaoQaCapture:
       time.sleep(0.35)
 
   def _dismiss_overlays(self) -> None:
-    """关闭模式菜单、分享层等覆盖聊天区的浮层。"""
+    """关闭模式菜单、分享层、隐私弹窗等覆盖聊天区的浮层。"""
+    try:
+      self._crawler._dismiss_blocking_dialogs()
+    except Exception:
+      pass
     for sel in (
       '//*[@resource-id="com.larus.nova:id/menu_text"]',
       '//*[@resource-id="com.larus.nova:id/menu_sub_text"]',
@@ -281,11 +295,22 @@ class DoubaoQaCapture:
       except Exception:
         continue
     self._crawler.nav.dismiss_overlay()
+    try:
+      if self._crawler.nav.dismiss_push_reminder_dialog():
+        print("[问答] 已关闭消息提醒弹窗")
+    except Exception:
+      pass
+    try:
+      self._crawler.nav.accept_blocking_prompts(max_rounds=2)
+    except Exception:
+      pass
 
   def _input_box_ready(self) -> bool:
     """聊天输入框是否可见（新会话就绪信号）。"""
     for sel in (
       '//*[@resource-id="com.larus.nova:id/input_text"]',
+      '//*[@resource-id="com.larus.nova:id/input"]',
+      '//*[@content-desc="文本输入"]',
       '//*[contains(@class,"EditText")]',
     ):
       try:
@@ -381,66 +406,140 @@ class DoubaoQaCapture:
     )
     return False
 
+  def _read_current_mode_label(self) -> str:
+    """读输入栏当前模式芯片文案（快速/思考/专家）。"""
+    for text in QA_MODE_CHIP_TEXTS:
+      try:
+        el = self.d.xpath(
+          f'//*[@resource-id="com.larus.nova:id/tv_item_name" and @text="{text}"]'
+        ).get(timeout=0.35)
+        if el:
+          return text
+      except Exception:
+        continue
+    for text in QA_MODE_CHIP_TEXTS:
+      try:
+        el = self.d.xpath(
+          f'//*[contains(@content-desc,"{text}")]'
+        ).get(timeout=0.25)
+        if el:
+          return text
+      except Exception:
+        continue
+    return ""
+
+  def _answer_looks_like_quota_block(self, text: str) -> bool:
+    t = (text or "").strip()
+    return bool(t) and any(m in t for m in QA_QUOTA_ANSWER_MARKERS)
+
   def _select_mode(self, mode: str) -> bool:
-    """打开模式菜单并选择「快速」或「思考」。"""
+    """按 resource-id + 精确文案切换模式（禁止坐标/模糊 content-desc 点选）。
+
+    App 升级后菜单项位置会变，「深度思考」desc 也可能绑到专家；
+    只点 menu_text=快速/思考，并读芯片校验，绝不可落在专家。
+    """
     label = QA_MODE_LABELS.get(mode, QA_MODE_LABELS["fast"])
     self._dismiss_overlays()
+    current = self._read_current_mode_label()
+    if current == label:
+      print(f"[问答] 当前已是模式: {label}")
+      return True
+    if mode == "fast" and current == "专家":
+      print("[问答] 当前误在专家模式，强制切回快速")
+
+    # 优先点输入栏模式芯片打开菜单（文案精确），避免点「深度思考」desc 误触专家
     opened = False
-    for sel in (
+    chip_or = " or ".join(f'@text="{t}"' for t in QA_MODE_CHIP_TEXTS)
+    open_selectors = (
+      f'//*[@resource-id="com.larus.nova:id/tv_item_name" and ({chip_or})]',
       MODE_MENU_XPATH,
-      '//*[contains(@content-desc,"深度思考")]',
-      '//*[@resource-id="com.larus.nova:id/tv_item_name" and (@text="思考" or @text="快速")]',
-    ):
+    )
+    for sel in open_selectors:
       try:
         toggle = self.d.xpath(sel).get(timeout=1.5)
-        if toggle:
-          toggle.click()
-          # 等待模式菜单项出现；就绪即继续，未就绪退回原固定等待时长
-          poll_until(
-            lambda: bool(
-              self.d.xpath(
-                '//*[(@resource-id="com.larus.nova:id/menu_text"'
-                ' or @resource-id="com.larus.nova:id/tv_item_name")'
-                f' and @text="{label}"]'
-              ).get(timeout=0.1)
-            ),
-            timeout=0.7,
-            interval=0.1,
-            settle=0.15,
-          )
-          opened = True
+        if not toggle:
+          continue
+        toggle.click()
+        poll_until(
+          lambda: bool(
+            self.d.xpath(
+              '//*[@resource-id="com.larus.nova:id/menu_text"'
+              f' and @text="{label}"]'
+            ).get(timeout=0.1)
+          ),
+          timeout=1.0,
+          interval=0.1,
+          settle=0.15,
+        )
+        opened = bool(
+          self.d.xpath(
+            '//*[@resource-id="com.larus.nova:id/menu_text"'
+            f' and @text="{label}"]'
+          ).get(timeout=0.3)
+        )
+        if opened:
           break
+        # 菜单未出现：可能点成了别的入口，收起后试下一个
+        self._dismiss_overlays()
       except Exception:
         continue
     if not opened:
-      print("[问答] 未找到模式切换入口")
+      print("[问答] 未找到模式菜单（仅按精确文案打开，不用坐标）")
       return False
+
     try:
+      # 菜单内只点 menu_text 精确匹配；禁止点相邻「专家」
       item = self.d.xpath(
         f'//*[@resource-id="com.larus.nova:id/menu_text" and @text="{label}"]'
       ).get(timeout=1.5)
       if not item:
-        item = self.d.xpath(
-          f'//*[@resource-id="com.larus.nova:id/tv_item_name" and @text="{label}"]'
-        ).get(timeout=1.0)
-      if not item:
         print(f"[问答] 模式菜单未找到「{label}」")
         self._dismiss_overlays()
         return False
+      try:
+        got = (item.info.get("text") or "").strip()
+      except Exception:
+        got = ""
+      if got != label:
+        print(f"[问答] 拒绝点击：期望 {label!r}，节点文案 {got!r}")
+        self._dismiss_overlays()
+        return False
+      # 若菜单里同时能看到专家，确认我们点的不是那一行
+      expert = self.d.xpath(
+        '//*[@resource-id="com.larus.nova:id/menu_text" and @text="专家"]'
+      ).get(timeout=0.2)
+      if expert and mode == "fast":
+        try:
+          eb = expert.bounds
+          ib = item.bounds
+          if eb and ib and abs(int(eb[1]) - int(ib[1])) < 8:
+            print("[问答] 拒绝点击：快速与专家 bounds 重叠，疑似点歪")
+            self._dismiss_overlays()
+            return False
+        except Exception:
+          pass
       item.click()
-      # 等待菜单收起（菜单项消失）；就绪即继续，未就绪退回原固定等待时长
       poll_until(
         lambda: not self.d.xpath(
-          '//*[(@resource-id="com.larus.nova:id/menu_text"'
-          ' or @resource-id="com.larus.nova:id/tv_item_name")'
+          '//*[@resource-id="com.larus.nova:id/menu_text"'
           f' and @text="{label}"]'
         ).get(timeout=0.1),
-        timeout=0.6,
+        timeout=0.8,
         interval=0.1,
-        settle=0.1,
+        settle=0.2,
       )
       self._dismiss_overlays()
-      print(f"[问答] 已选择模式: {label}")
+      verified = self._read_current_mode_label()
+      if verified == label:
+        print(f"[问答] 已选择模式: {label}（校验通过）")
+        return True
+      if mode == "fast" and verified == "专家":
+        print("[问答] 模式校验失败：仍在专家（疑似 App 升级后点歪）")
+        return False
+      if verified and verified != label:
+        print(f"[问答] 模式校验失败：期望 {label}，实际 {verified}")
+        return False
+      print(f"[问答] 已选择模式: {label}（芯片未读到，按点击成功）")
       return True
     except Exception as exc:
       print(f"[问答] 切换模式失败: {exc}")
@@ -534,14 +633,40 @@ class DoubaoQaCapture:
       shot_path = ""
     return xml_path if xml_text else "", shot_path
 
+  def _message_list_roi_frac(self) -> tuple[float, float]:
+    """优先用 message_list 实际 bounds 收紧 ROI，减少顶底固定栏进帧。"""
+    y0, y1 = self.p.qa_shot_roi_y0, self.p.qa_shot_roi_y1
+    try:
+      el = self.d.xpath(
+        '//*[@resource-id="com.larus.nova:id/message_list"]'
+      ).get(timeout=0.4)
+      if not el:
+        return y0, y1
+      b = el.bounds
+      if not b:
+        return y0, y1
+      _w, sh = display_wh(self.d, profile=self.p)
+      if sh <= 0:
+        return y0, y1
+      list_y0 = max(0.0, min(1.0, (int(b[1]) + 4) / sh))
+      list_y1 = max(0.0, min(1.0, (int(b[3]) - 4) / sh))
+      merged_y0 = max(y0, list_y0)
+      merged_y1 = min(y1, list_y1)
+      if merged_y1 - merged_y0 >= 0.20:
+        return merged_y0, merged_y1
+    except Exception:
+      pass
+    return y0, y1
+
   def _qa_shot_profile(self) -> GestureProfile:
-    """聊天区长截图 ROI（覆盖 fc_detail 顶底比例）。"""
+    """聊天区长截图 ROI（message_list 动态 bounds + profile 顶底比例）。"""
     from dataclasses import replace
 
+    roi_y0, roi_y1 = self._message_list_roi_frac()
     return replace(
       self.p,
-      fc_detail_roi_y0=self.p.qa_shot_roi_y0,
-      fc_detail_roi_y1=self.p.qa_shot_roi_y1,
+      fc_detail_roi_y0=roi_y0,
+      fc_detail_roi_y1=roi_y1,
       fc_detail_strip_roi_x0=0.0,
       fc_detail_strip_roi_x1=1.0,
     )
@@ -556,8 +681,53 @@ class DoubaoQaCapture:
       self.p.qa_shot_scroll_duration,
     )
 
-  def _swipe_message_list_down(self) -> None:
-    """在外层 message_list 内下滑，避免误滚嵌套引用列表。"""
+  def _qa_shot_roi_height_px(self) -> int:
+    """问答长截图可见内容区高度（像素）。"""
+    _w, sh = display_wh(self.d, profile=self.p)
+    y0, y1 = self._message_list_roi_frac()
+    return max(280, int(sh * (y1 - y0)))
+
+  def _copy_bar_top_screen_y(self) -> int | None:
+    """回答底部复制/分享操作栏顶边（屏幕坐标），不可见时 None。"""
+    try:
+      el = self.d.xpath(
+        '//*[@resource-id="com.larus.nova:id/msg_action_copy"]'
+      ).get(timeout=0.2)
+      if not el:
+        return None
+      b = el.bounds
+      if not b:
+        return None
+      return int(b[1])
+    except Exception:
+      return None
+
+  def _crop_shot_for_stitch(
+    self,
+    path: str,
+    profile: GestureProfile,
+    copy_bar_top_y: int | None,
+  ) -> Image.Image:
+    """裁 ROI；若本帧含复制栏则裁到栏上方，避免拼接重复底栏。"""
+    crop = crop_fullscreen_to_detail_content(path, profile)
+    if copy_bar_top_y is None:
+      return crop
+    try:
+      with Image.open(path) as im:
+        _w, sh = im.size
+      roi_top = max(0, min(sh, int(sh * profile.fc_detail_roi_y0)))
+      trim_h = copy_bar_top_y - roi_top - 8
+      if 80 < trim_h < crop.height:
+        return crop.crop((0, 0, crop.width, trim_h))
+    except Exception:
+      pass
+    return crop
+
+  def _swipe_message_list_up(self, *, scale: float = 1.0) -> None:
+    """外层 message_list 内上滑（回退），用于重叠不足时退回再小步下滑。"""
+    roi_h = self._qa_shot_roi_height_px()
+    max_advance = max(160, int(roi_h * self.p.qa_shot_scroll_advance_frac))
+    duration = self.p.qa_shot_list_swipe_duration
     try:
       el = self.d.xpath(
         '//*[@resource-id="com.larus.nova:id/message_list"]'
@@ -568,17 +738,71 @@ class DoubaoQaCapture:
           x1, y1, x2, y2 = int(b[0]), int(b[1]), int(b[2]), int(b[3])
           cx = (x1 + x2) // 2
           ch = max(y2 - y1, 120)
-          y_start = y1 + int(ch * 0.78)
-          y_end = y1 + int(ch * 0.28)
+          swipe_px = int(min(ch * self.p.qa_shot_list_swipe_frac, max_advance) * scale)
+          swipe_px = max(120, min(swipe_px, ch - 16))
+          y_start = y1 + int(ch * 0.32)
+          y_end = y_start + swipe_px
           y_start = max(y1 + 8, min(y2 - 8, y_start))
           y_end = max(y1 + 8, min(y2 - 8, y_end))
-          if y_end >= y_start:
-            y_end = max(y1 + 8, y_start - int(ch * 0.55))
-          self.d.swipe(cx, y_start, cx, y_end, self.p.qa_shot_scroll_duration)
+          if y_end <= y_start:
+            y_end = min(y2 - 8, y_start + swipe_px)
+          self.d.swipe(cx, y_start, cx, y_end, duration)
           return
     except Exception:
       pass
-    self._swipe_chat_down()
+    w, sh = display_wh(self.d, profile=self.p)
+    cx = w // 2
+    swipe_px = int(min(
+      sh * (self.p.qa_shot_scroll_end_y - self.p.qa_shot_scroll_start_y),
+      max_advance,
+    ) * scale)
+    swipe_px = max(120, swipe_px)
+    y_start = int(sh * self.p.qa_shot_scroll_end_y)
+    y_end = y_start + swipe_px
+    self.d.swipe(cx, y_start, cx, y_end, duration)
+
+  def _swipe_message_list_down(self, *, scale: float = 1.0) -> None:
+    """
+    在外层 message_list 内下滑，避免误滚嵌套引用列表。
+
+    单次滑动距离受 ROI 高度上限约束，避免一帧滑过整段正文（漏截）。
+    """
+    roi_h = self._qa_shot_roi_height_px()
+    max_advance = max(160, int(roi_h * self.p.qa_shot_scroll_advance_frac))
+    duration = self.p.qa_shot_list_swipe_duration
+    try:
+      el = self.d.xpath(
+        '//*[@resource-id="com.larus.nova:id/message_list"]'
+      ).get(timeout=0.6)
+      if el:
+        b = el.bounds
+        if b:
+          x1, y1, x2, y2 = int(b[0]), int(b[1]), int(b[2]), int(b[3])
+          cx = (x1 + x2) // 2
+          ch = max(y2 - y1, 120)
+          swipe_px = int(min(ch * self.p.qa_shot_list_swipe_frac, max_advance) * scale)
+          swipe_px = max(120, min(swipe_px, ch - 16))
+          y_start = y1 + int(ch * 0.76)
+          y_end = y_start - swipe_px
+          y_start = max(y1 + 8, min(y2 - 8, y_start))
+          y_end = max(y1 + 8, min(y2 - 8, y_end))
+          if y_end >= y_start:
+            y_end = max(y1 + 8, y_start - swipe_px)
+          self.d.swipe(cx, y_start, cx, y_end, duration)
+          return
+    except Exception:
+      pass
+    # 回退：按整屏比例滑，但仍受 ROI 上限约束
+    w, sh = display_wh(self.d, profile=self.p)
+    cx = w // 2
+    swipe_px = int(min(
+      sh * (self.p.qa_shot_scroll_start_y - self.p.qa_shot_scroll_end_y),
+      max_advance,
+    ) * scale)
+    swipe_px = max(120, swipe_px)
+    y_start = int(sh * self.p.qa_shot_scroll_start_y)
+    y_end = y_start - swipe_px
+    self.d.swipe(cx, y_start, cx, y_end, duration)
 
   def _answer_bottom_visible(self) -> bool:
     """当前屏是否已滚到回答底部（复制/分享操作栏可见）。"""
@@ -593,31 +817,90 @@ class DoubaoQaCapture:
         return False
       w, h = display_wh(self.d, profile=self.p)
       cy = (int(b[1]) + int(b[3])) // 2
-      roi_top = int(h * self.p.qa_shot_roi_y0)
-      roi_bot = int(h * self.p.qa_shot_roi_y1)
+      roi_top = int(h * self._message_list_roi_frac()[0])
+      roi_bot = int(h * self._message_list_roi_frac()[1])
       return roi_top <= cy <= roi_bot
     except Exception:
       return False
 
-  def _capture_answer_longshot(self, session_dir: str) -> list[str]:
+  def _capture_message_longshot(
+    self,
+    session_dir: str,
+    *,
+    shot_prefix: str = "shot",
+    label: str = "回答",
+    stop_at_answer_bottom: bool = True,
+    stop_when_panel_gone: bool = False,
+    scroll_to_top_first: bool = True,
+    align_thinking_first: bool = False,
+  ) -> tuple[list[str], list[int | None]]:
     """
-    回答正文长截图：引用区保持折叠，仅滚外层 message_list，多帧 ROI 去重。
-    对齐电商 capture_detail_content_strip_sequence 的单滚动面模式。
+    外层 message_list 多帧长截图；引用列表保持折叠（仅滚外层）。
+
+    返回 (截图路径列表, 各帧复制栏顶边 y；无栏为 None)。
     """
     profile = self._qa_shot_profile()
     kept_paths: list[str] = []
-    tmp_path = os.path.join(session_dir, "_shot_tmp.png")
+    copy_bar_tops: list[int | None] = []
+    tmp_path = os.path.join(session_dir, f"_{shot_prefix}_tmp.png")
     quiet_hits = 0
+    panel_gone_hits = 0
+    overlap_retries = 0
 
-    self._scroll_message_to_top()
-    time.sleep(0.5)
+    if scroll_to_top_first:
+      self._scroll_message_to_top()
+      time.sleep(0.5)
+    if align_thinking_first:
+      self._scroll_to_thinking_panel(max_rounds=6)
+      time.sleep(0.4)
 
     for round_i in range(self.p.qa_shot_max_frames):
       try:
         self.d.screenshot(tmp_path)
       except OSError as exc:
-        print(f"[问答] 分屏截图失败: {exc}")
+        print(f"[问答] {label}长截图失败: {exc}")
         break
+
+      copy_top = self._copy_bar_top_screen_y()
+
+      if kept_paths:
+        try:
+          prev_crop = self._crop_shot_for_stitch(
+            kept_paths[-1], profile, copy_bar_tops[-1],
+          )
+          curr_crop = self._crop_shot_for_stitch(tmp_path, profile, copy_top)
+          overlap_est = estimate_vertical_overlap_v2(prev_crop, curr_crop)
+          min_overlap = int(prev_crop.height * self.p.qa_shot_min_overlap_frac)
+          if overlap_est.diagnosis == "near_duplicate":
+            print(
+              f"[问答] {label}长截图近重复帧（重叠 {overlap_est.overlap_px}px"
+              f" / {overlap_est.overlap_frac:.0%}），跳过本帧并加大滑动"
+            )
+            self._swipe_message_list_down(scale=1.25)
+            time.sleep(self.p.qa_shot_post_swipe_sleep)
+            continue
+          if (
+            overlap_est.diagnosis == "gap_risk"
+            and overlap_est.overlap_px < min_overlap
+          ):
+            if overlap_retries < 2:
+              overlap_retries += 1
+              print(
+                f"[问答] {label}长截图重叠 {overlap_est.overlap_px}px < {min_overlap}px，"
+                f"回退并缩小步长重试({overlap_retries}/2)"
+              )
+              self._swipe_message_list_up(scale=0.5)
+              time.sleep(0.32)
+              self._swipe_message_list_down(scale=0.58)
+              time.sleep(self.p.qa_shot_post_swipe_sleep)
+              continue
+            print(
+              f"[问答] 警告：{label}帧间重叠 {overlap_est.overlap_px}px < {min_overlap}px，"
+              "长图可能漏截正文"
+            )
+        except Exception as exc:
+          print(f"[问答] {label}长截图重叠检测跳过: {exc}")
+      overlap_retries = 0
 
       if kept_paths:
         fine, coarse, dham = roi_pair_metrics(kept_paths[-1], tmp_path, profile)
@@ -625,7 +908,7 @@ class DoubaoQaCapture:
         if quiet:
           quiet_hits += 1
           print(
-            f"[问答] 回答长截图静止 {quiet_hits}/{self.p.qa_shot_quiet_rounds} ({reason})"
+            f"[问答] {label}长截图静止 {quiet_hits}/{self.p.qa_shot_quiet_rounds} ({reason})"
           )
           if quiet_hits >= self.p.qa_shot_quiet_rounds:
             break
@@ -636,17 +919,27 @@ class DoubaoQaCapture:
           continue
         quiet_hits = 0
 
-      out = os.path.join(session_dir, f"shot_{len(kept_paths) + 1:02d}.png")
+      out = os.path.join(session_dir, f"{shot_prefix}_{len(kept_paths) + 1:02d}.png")
       try:
         shutil.copy2(tmp_path, out)
       except OSError as exc:
         print(f"[问答] 保存截图失败: {exc}")
         break
       kept_paths.append(out)
+      copy_bar_tops.append(copy_top)
 
-      if self._answer_bottom_visible():
-        print("[问答] 已见回答底部操作栏，停止长截图")
+      if stop_at_answer_bottom and self._answer_bottom_visible():
+        print(f"[问答] {label}长截图：已见回答底部操作栏，停止")
         break
+
+      if stop_when_panel_gone:
+        if not self._thinking_panel_on_screen() and not self._any_visible_refs_on_screen():
+          panel_gone_hits += 1
+          if panel_gone_hits >= self.p.qa_shot_quiet_rounds:
+            print(f"[问答] {label}长截图：思考/引用已滚出屏，停止")
+            break
+        else:
+          panel_gone_hits = 0
 
       if round_i >= self.p.qa_shot_max_frames - 1:
         break
@@ -654,8 +947,44 @@ class DoubaoQaCapture:
       self._swipe_message_list_down()
       time.sleep(self.p.qa_shot_post_swipe_sleep)
 
-    print(f"[问答] 回答长截图完成: {len(kept_paths)} 屏")
-    return kept_paths
+    print(f"[问答] {label}长截图完成: {len(kept_paths)} 屏")
+    if os.path.isfile(tmp_path):
+      try:
+        os.remove(tmp_path)
+      except OSError:
+        pass
+    return kept_paths, copy_bar_tops
+
+  def _capture_answer_longshot(self, session_dir: str) -> tuple[list[str], list[int | None]]:
+    """回答正文长截图（引用折叠，滚外层 message_list）。"""
+    return self._capture_message_longshot(
+      session_dir,
+      shot_prefix="shot",
+      label="回答",
+      stop_at_answer_bottom=True,
+      stop_when_panel_gone=False,
+      scroll_to_top_first=True,
+      align_thinking_first=False,
+    )
+
+  def _capture_thinking_longshot(
+    self, session_dir: str, panel: ParsedThinkingPanel,
+  ) -> tuple[list[str], list[int | None]]:
+    """展开后补截思考/引用区，与回答段拼接为 full.png。"""
+    if not (
+      panel.references or panel.groups or panel.thinking_paragraphs
+    ):
+      return [], []
+    print("[问答] 展开态补截思考/引用长图...")
+    return self._capture_message_longshot(
+      session_dir,
+      shot_prefix="shot_think",
+      label="思考/引用",
+      stop_at_answer_bottom=False,
+      stop_when_panel_gone=True,
+      scroll_to_top_first=False,
+      align_thinking_first=True,
+    )
 
   def _ensure_thinking_header_expanded(self) -> bool:
     """展开思考头（已展开则不再点击，避免折叠）。"""
@@ -871,30 +1200,101 @@ class DoubaoQaCapture:
         print(f"[问答] 展开搜索组失败: {exc}")
     return expanded_count
 
+  def _is_answer_shot_path(self, path: str) -> bool:
+    base = os.path.basename(path)
+    return base.startswith("shot_") and not base.startswith("shot_think_")
+
+  def _is_think_shot_path(self, path: str) -> bool:
+    return os.path.basename(path).startswith("shot_think_")
+
   def _stitch_shot_paths(
     self,
     session_dir: str,
     kept_paths: list[str],
     profile: GestureProfile,
     tmp_path: str,
+    *,
+    copy_bar_tops: list[int | None] | None = None,
   ) -> str:
-    """将去重后的分屏截图拼接为 full.png。"""
+    """将分屏截图拼接为 full.png（仅回答段；思考/引用段另存 full_thinking.png）。"""
     stitched_path = ""
     if not kept_paths:
       return stitched_path
 
-    crops: list[Image.Image] = []
+    answer_paths: list[str] = []
+    think_paths: list[str] = []
+    answer_tops: list[int | None] = []
+    think_tops: list[int | None] = []
+    tops = copy_bar_tops if copy_bar_tops is not None else [None] * len(kept_paths)
+    if len(tops) < len(kept_paths):
+      tops = tops + [None] * (len(kept_paths) - len(tops))
+
+    for path, top in zip(kept_paths, tops):
+      if self._is_think_shot_path(path):
+        think_paths.append(path)
+        think_tops.append(top)
+      elif self._is_answer_shot_path(path):
+        answer_paths.append(path)
+        answer_tops.append(top)
+
+    if not answer_paths:
+      answer_paths = list(kept_paths)
+      answer_tops = list(tops)
+      think_paths = []
+      think_tops = []
+
+    answer_crops: list[Image.Image] = []
+    think_crops: list[Image.Image] = []
+    diagnoses: list = []
     try:
-      for p in kept_paths:
-        crops.append(crop_fullscreen_to_detail_content(p, profile))
-      stitched = stitch_content_strips_vertical(crops)
+      for p, copy_top in zip(answer_paths, answer_tops):
+        answer_crops.append(self._crop_shot_for_stitch(p, profile, copy_top))
+      for p, copy_top in zip(think_paths, think_tops):
+        think_crops.append(self._crop_shot_for_stitch(p, profile, copy_top))
+
+      answer_img, think_img, diagnoses = stitch_qa_shot_segments(
+        answer_crops,
+        think_crops,
+        answer_labels=[os.path.basename(p) for p in answer_paths],
+        think_labels=[os.path.basename(p) for p in think_paths],
+      )
+      answer_h = answer_img.height
+      think_h = think_img.height if think_img is not None else 0
       stitched_path = os.path.join(session_dir, "full.png")
-      stitched.save(stitched_path, format="PNG", optimize=True)
-      print(f"[问答] 已拼接长图: {stitched_path}（{len(kept_paths)} 屏，去重后）")
+      answer_img.save(stitched_path, format="PNG", optimize=True)
+      if think_img is not None:
+        think_path = os.path.join(session_dir, "full_thinking.png")
+        think_img.save(think_path, format="PNG", optimize=True)
+        think_img.close()
+      answer_img.close()
+
+      diag_path = os.path.join(session_dir, "stitch_diagnosis.json")
+      with open(diag_path, "w", encoding="utf-8") as f:
+        json.dump(
+          {
+            "stitched_height_px": answer_h,
+            "thinking_height_px": think_h,
+            "frame_count": len(answer_paths) + len(think_paths),
+            "answer_frame_count": len(answer_paths),
+            "thinking_frame_count": len(think_paths),
+            "pairs": [d.to_dict() for d in diagnoses],
+          },
+          f,
+          ensure_ascii=False,
+          indent=2,
+        )
+      answer_n = len(answer_paths)
+      think_n = len(think_paths)
+      near_dup_n = sum(1 for d in diagnoses if d.diagnosis == "near_duplicate")
+      seg = f"回答{answer_n}屏"
+      if think_n:
+        seg += f"（思考{think_n}屏→full_thinking.png）"
+      dup_note = f"，近重复拼接修正 {near_dup_n} 对" if near_dup_n else ""
+      print(f"[问答] 已拼接长图: {stitched_path}（{seg}{dup_note}）")
     except Exception as exc:
       print(f"[问答] 拼接长图失败: {exc}")
     finally:
-      for im in crops:
+      for im in answer_crops + think_crops:
         try:
           im.close()
         except Exception:
@@ -911,8 +1311,7 @@ class DoubaoQaCapture:
   ) -> ParsedThinkingPanel:
     """
     数据展开采集：展开思考头/搜索组 + 引用列表内滚动 + hierarchy dump 合并。
-    不负责长图拼接（由 _capture_answer_longshot 先行完成）。
-    结束时回顶重新展开，供后续引用 URL 解析。
+    回答长截图已先行完成；思考/引用长截图在展开后由调用方补截。
 
     无联网引用（fast 模式常见）时尽早短路，避免无谓的上滚与 hierarchy dump。
     """
@@ -1005,13 +1404,18 @@ class DoubaoQaCapture:
     self,
     session_dir: str,
   ) -> tuple[ParsedThinkingPanel, list[str], str]:
-    """兼容旧探针：长截图 + 数据展开。"""
-    shot_paths = self._capture_answer_longshot(session_dir)
+    """兼容旧探针：回答长截图 → 展开 → 思考/引用补截 → 拼接。"""
+    answer_paths, answer_tops = self._capture_answer_longshot(session_dir)
+    panel = self._expand_and_collect_panels(session_dir, shot_count=len(answer_paths))
+    think_paths, think_tops = self._capture_thinking_longshot(session_dir, panel)
+    all_paths = answer_paths + think_paths
+    all_tops = answer_tops + think_tops
     profile = self._qa_shot_profile()
     tmp_path = os.path.join(session_dir, "_shot_tmp.png")
-    stitched = self._stitch_shot_paths(session_dir, shot_paths, profile, tmp_path)
-    panel = self._expand_and_collect_panels(session_dir)
-    return panel, shot_paths, stitched
+    stitched = self._stitch_shot_paths(
+      session_dir, all_paths, profile, tmp_path, copy_bar_tops=all_tops,
+    )
+    return panel, all_paths, stitched
 
   def _merge_thinking_panels(self, panels: list[ParsedThinkingPanel]) -> ParsedThinkingPanel:
     merged = ParsedThinkingPanel()
@@ -1164,6 +1568,9 @@ class DoubaoQaCapture:
     net_dump_dir: str = "",
     net_since_mtime: float | None = None,
     expected_prompt: str = "",
+    expected_answer: str = "",
+    sms_token: str = "",
+    sms_device_id: str = "",
   ) -> list[Citation]:
     if not thinking_refs:
       return thinking_refs
@@ -1187,6 +1594,9 @@ class DoubaoQaCapture:
           max_refs=self.p.qa_resolve_url_max_refs,
           method="logcat",
           expected_prompt=expected_prompt,
+          expected_answer=expected_answer,
+          sms_token=sms_token,
+          sms_device_id=sms_device_id,
         )
       return refs
 
@@ -1201,6 +1611,9 @@ class DoubaoQaCapture:
       max_refs=self.p.qa_resolve_url_max_refs,
       method=method,
       expected_prompt=expected_prompt,
+      expected_answer=expected_answer,
+      sms_token=sms_token,
+      sms_device_id=sms_device_id,
     )
 
   def _scroll_visible_ref_lists(self) -> None:
@@ -1463,17 +1876,42 @@ class DoubaoQaCapture:
           time.sleep(0.8)
       else:
         print(f"[问答] 警告: 未能切换到 {mode} 模式，继续发送")
+      # fast 模式下若仍显示专家，再强制切一次，避免耗专业版额度
+      if mode == "fast" and self._read_current_mode_label() == "专家":
+        print("[问答] 发送前仍检测到专家模式，再次强制切快速")
+        if not self._select_mode("fast"):
+          print("[问答] 无法离开专家模式，中止本轮以免空耗额度")
+          self._save_record(record)
+          return record
       if not self._crawler.send_message(prompt):
-        self._save_record(record)
-        return record
+        print("[问答] 发送失败，尝试重启豆包后重发...")
+        from app.modules.navigator import Navigator
+        Navigator(self.d).hard_restart_app(reason="发送失败")
+        time.sleep(2.0)
+        if (
+          self._crawler.start_app()
+          and self._crawler.handle_login_if_needed(
+            sms_token=sms_token, device_id=sms_device_id,
+          )
+          and self._open_new_conversation()
+          and self._select_mode(mode)
+          and self._crawler.send_message(prompt)
+        ):
+          print("[问答] 重启后发送成功")
+        else:
+          self._save_record(record)
+          return record
       _phase("新会话+切模式+发送")
       if not self._crawler.wait_reply_done(timeout=180):
         print("[问答] 等待回复超时，继续尝试采集当前屏内容")
       _phase("等待回复完成")
       if not self._ensure_expected_chat(prompt, phase="回复完成后"):
-        print("[问答] 中止采集：当前不在目标会话（可能落入历史对话）")
-        self._save_record(record)
-        return record
+        from app.modules.navigator import Navigator
+        nav = Navigator(self.d)
+        if nav.reenter_chat_by_prompt(prompt):
+          print("[问答] 会话错位后已重进，继续采集")
+        else:
+          print("[问答] 会话可能错位，仍继续采集（避免空数据中止）")
 
     # 等待回答操作栏（复制按钮）就绪后再采集；就绪即继续，未就绪退回原固定等待时长
     poll_until(
@@ -1489,15 +1927,38 @@ class DoubaoQaCapture:
 
     early_answer_body = self._capture_answer_body_early(session_dir, prompt)
     _phase("早期正文采集")
+    if self._answer_looks_like_quota_block(early_answer_body):
+      print(
+        "[问答] 检测到专家/专业版额度提示，中止本轮采集并重试"
+        f"（正文前缀: {early_answer_body[:48]!r}）"
+      )
+      # 关掉额度弹窗，避免挡住下一轮新建对话
+      try:
+        from app.modules.navigator import Navigator
+        Navigator(self.d).accept_blocking_prompts(max_rounds=3)
+      except Exception:
+        pass
+      record.answer_body = early_answer_body
+      self._save_record(record)
+      return record
 
-    shot_paths = self._capture_answer_longshot(session_dir)
+    answer_paths, answer_tops = self._capture_answer_longshot(session_dir)
     _phase("回答长截图")
+    thinking_panel = self._expand_and_collect_panels(
+      session_dir, shot_count=len(answer_paths),
+    )
+    _phase("展开+数据采集")
+    think_paths, think_tops = self._capture_thinking_longshot(session_dir, thinking_panel)
+    if think_paths:
+      _phase("思考/引用长截图")
+    shot_paths = answer_paths + think_paths
+    copy_bar_tops = answer_tops + think_tops
     profile = self._qa_shot_profile()
     tmp_path = os.path.join(session_dir, "_shot_tmp.png")
-    stitched = self._stitch_shot_paths(session_dir, shot_paths, profile, tmp_path)
+    stitched = self._stitch_shot_paths(
+      session_dir, shot_paths, profile, tmp_path, copy_bar_tops=copy_bar_tops,
+    )
     _phase("长图拼接")
-    thinking_panel = self._expand_and_collect_panels(session_dir, shot_count=len(shot_paths))
-    _phase("展开+数据采集")
     record.screenshots = shot_paths
     record.stitched_screenshot = stitched
 
@@ -1518,6 +1979,9 @@ class DoubaoQaCapture:
           net_dump_dir=net_dump_dir,
           net_since_mtime=capture_started_at if resolve_method == "net" else None,
           expected_prompt=prompt,
+          expected_answer=early_answer_body,
+          sms_token=sms_token,
+          sms_device_id=sms_device_id,
         )
         self._sync_urls_to_panel(thinking_panel, thinking_refs_for_resolve)
 
@@ -1594,6 +2058,9 @@ class DoubaoQaCapture:
             net_dump_dir=net_dump_dir,
             net_since_mtime=capture_started_at if resolve_method == "net" else None,
             expected_prompt=prompt,
+            expected_answer=early_answer_body,
+            sms_token=sms_token,
+            sms_device_id=sms_device_id,
           )
         elif not can_fallback:
           print("[问答] 回落解析跳过：会话已错位（避免在历史对话上空转）")

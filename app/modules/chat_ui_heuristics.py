@@ -118,10 +118,48 @@ _CHAT_PLACEHOLDER_TEXTS = frozenset({
 })
 
 
+def text_anchor_visible(
+    device: Any,
+    needles: list[str],
+    *,
+    profile: GestureProfile | None = None,
+) -> bool:
+    """屏上 hierarchy 是否含任一锚点片段（用于 URL 解析期会话校验）。"""
+    cleaned = [n.strip() for n in needles if n and len(n.strip()) >= 6]
+    if not cleaned:
+        return False
+    try:
+        xml = device.dump_hierarchy(compressed=False) or ""
+    except Exception:
+        return False
+    if not xml.strip():
+        return False
+    compact = "".join(xml.split())
+    for needle in cleaned:
+        key = "".join(needle.split())
+        if key and key in compact:
+            return True
+    return False
+
+
+def answer_snippet_needles(answer_snippet: str) -> list[str]:
+    """从回答正文提取用于重进/锚定会话的片段（唯一性优先）。"""
+    ans = (answer_snippet or "").strip()
+    if not ans:
+        return []
+    head = ans.lstrip("*# \n").split("\n", 1)[0]
+    needles: list[str] = []
+    for n in (head[:28], head[:20], head[:14]):
+        if n and len(n) >= 8 and n not in needles:
+            needles.append(n)
+    return needles
+
+
 def read_visible_user_prompt(
     device: Any,
     *,
     profile: GestureProfile | None = None,
+    expected_prompt: str = "",
 ) -> str:
     """从当前聊天屏 hierarchy 读最后一条用户问题（非输入框占位）。"""
     from app.modules.qa_hierarchy import parse_exchange_from_hierarchy
@@ -135,7 +173,11 @@ def read_visible_user_prompt(
     if not xml.strip():
         return ""
     parsed = parse_exchange_from_hierarchy(
-        xml, screen_w=w, screen_h=h, profile=p,
+        xml,
+        prompt_text=expected_prompt,
+        screen_w=w,
+        screen_h=h,
+        profile=p,
     )
     q = (parsed.question_text or "").strip()
     if not q or q in _CHAT_PLACEHOLDER_TEXTS:
@@ -167,17 +209,25 @@ def chat_prompt_conflicts(
     expected_prompt: str,
     *,
     profile: GestureProfile | None = None,
+    answer_snippet: str = "",
 ) -> tuple[bool, str]:
     """
     判断当前聊天页是否与目标会话「明确冲突」。
 
     仅当屏上读到**另一条非空且不匹配**的用户提问时判定冲突（阳性证据）；
     读不到用户气泡（问题已滚出屏幕）不算冲突，避免误杀。
+    若目标回答正文锚点仍在屏上，视为未冲突（引用解析期问题气泡常已滚出）。
     返回 (是否冲突, 屏上可见提问)。
     """
     if not (expected_prompt or "").strip():
         return False, ""
-    visible = read_visible_user_prompt(device, profile=profile)
+    if answer_snippet and text_anchor_visible(
+        device, answer_snippet_needles(answer_snippet), profile=profile,
+    ):
+        return False, ""
+    visible = read_visible_user_prompt(
+        device, profile=profile, expected_prompt=expected_prompt,
+    )
     if not visible:
         return False, ""
     if prompt_matches_chat(expected_prompt, visible):
@@ -327,6 +377,28 @@ _MSG_ACTION_COPY_SELECTORS = (
     '//*[@resource-id="com.larus.nova:id/msg_action_copy_text"]',
 )
 
+CHAT_INPUT_XPATHS: tuple[str, ...] = (
+    '//*[@resource-id="com.larus.nova:id/input_text"]',
+    '//*[contains(@class,"EditText")]',
+)
+
+CHAT_TEXT_MODE_SWITCH_XPATHS: tuple[str, ...] = (
+    '//*[@resource-id="com.larus.nova:id/action_input"]',
+    '//*[@content-desc="文本输入"]',
+)
+
+CHAT_SEND_XPATHS: tuple[str, ...] = (
+    '//*[@resource-id="com.larus.nova:id/action_send"]',
+    '//*[@content-desc="发送"]',
+    '//*[@contentDescription="发送"]',
+    '//*[@text="发送"]',
+)
+
+_VOICE_MODE_HINTS: frozenset[str] = frozenset({
+    "按住说话",
+    "发消息或按住说话",
+})
+
 _COPY_TEXT_SELECTORS = (
     '//*[@text="复制"]',
     '//*[@text="复制文本"]',
@@ -352,6 +424,220 @@ def _is_action_bar_copy(device: Any, node: Any) -> bool:
             return True
     except Exception:
         pass
+    return False
+
+
+def _has_text_input_field(device: Any) -> bool:
+    try:
+        el = device.xpath('//*[@resource-id="com.larus.nova:id/input_text"]').get(timeout=0.25)
+        return el is not None
+    except Exception:
+        return False
+
+
+def _is_voice_input_mode(device: Any) -> bool:
+    if _has_text_input_field(device):
+        return False
+    try:
+        speak = device.xpath(
+            '//*[@resource-id="com.larus.nova:id/speak_normal"]'
+        ).get(timeout=0.25)
+        if speak and "按住说话" in (speak.info.get("text") or ""):
+            return True
+    except Exception:
+        pass
+    for sel in CHAT_TEXT_MODE_SWITCH_XPATHS:
+        try:
+            if device.xpath(sel).get(timeout=0.2):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def find_chat_input(device: Any) -> tuple[Any | None, str]:
+    """定位聊天 EditText 输入框，返回 (元素, xpath)。"""
+    for sel in CHAT_INPUT_XPATHS:
+        try:
+            el = device.xpath(sel).get(timeout=0.6)
+            if el:
+                cls = (el.info.get("className") or "").strip()
+                if "EditText" in cls or sel.endswith("input_text\"]"):
+                    return el, sel
+        except Exception:
+            continue
+    return None, ""
+
+
+def _chat_input_text(device: Any) -> str:
+    try:
+        el = device.xpath('//*[@resource-id="com.larus.nova:id/input_text"]').get(timeout=0.25)
+        if el:
+            return (el.info.get("text") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def chat_input_contains(device: Any, text: str, *, min_prefix: int = 4) -> bool:
+    """输入框是否已含目标文案（用于多策略输入后的成功判据）。"""
+    key = "".join((text or "").split())
+    if not key:
+        return False
+    prefix_len = max(min_prefix, min(8, len(key)))
+    prefix = key[:prefix_len]
+    visible = "".join(_chat_input_text(device).split())
+    return bool(visible and prefix in visible)
+
+
+def ensure_text_input_mode(device: Any, profile: GestureProfile | None = None) -> bool:
+    """从语音模式切到文本输入（新机默认「按住说话」，需点 action_input）。"""
+    import time
+
+    if _has_text_input_field(device):
+        try:
+            device.set_input_ime(True)
+        except Exception:
+            pass
+        return True
+
+    if not _is_voice_input_mode(device):
+        return _has_text_input_field(device)
+
+    print("[发送] 检测到语音输入模式，点击「文本输入」切换")
+    for sel in CHAT_TEXT_MODE_SWITCH_XPATHS:
+        try:
+            btn = device.xpath(sel).get(timeout=0.6)
+            if btn:
+                btn.click()
+                break
+        except Exception:
+            continue
+    else:
+        return False
+
+    deadline = time.time() + 2.5
+    while time.time() < deadline:
+        if _has_text_input_field(device):
+            try:
+                device.set_input_ime(True)
+            except Exception:
+                pass
+            return True
+        time.sleep(0.15)
+    return False
+
+
+def type_chat_message(
+    device: Any,
+    text: str,
+    *,
+    profile: GestureProfile | None = None,
+) -> bool:
+    """多机型兼容：新机先切文本模式，再用 set_text / send_keys 输入。"""
+    import time
+
+    if not ensure_text_input_mode(device, profile):
+        print("[发送] 未能切换到文本输入模式")
+        return False
+
+    el, _ = find_chat_input(device)
+    if el is None:
+        print("[发送] 未找到 input_text 输入框")
+        return False
+
+    try:
+        el.click()
+        time.sleep(0.35)
+    except Exception:
+        pass
+    try:
+        device.set_input_ime(True)
+    except Exception:
+        pass
+
+    input_methods: list[tuple[str, Any]] = [
+        (
+            "resource_set_text",
+            lambda: device(resourceId="com.larus.nova:id/input_text").set_text(text),
+        ),
+        ("send_keys", lambda: device.send_keys(text)),
+    ]
+
+    for method, action in input_methods:
+        try:
+            action()
+        except Exception as exc:
+            print(f"[发送] 输入 {method} 失败: {exc}")
+            continue
+        time.sleep(0.55)
+        if chat_input_contains(device, text):
+            print(f"[发送] 已输入 ({method}): {text[:40]}")
+            return True
+        print(f"[发送] {method} 未生效，尝试下一种输入方式")
+
+    return False
+
+
+def click_chat_send(device: Any, *, profile: GestureProfile | None = None) -> bool:
+    """点击发送按钮；键盘遮挡时先 back 再重试，最后坐标兜底。"""
+    import time
+
+    p = profile or GestureProfile()
+
+    def _try_xpath() -> bool:
+        for sel in CHAT_SEND_XPATHS:
+            try:
+                btn = device.xpath(sel).get(timeout=0.7)
+                if btn:
+                    btn.click()
+                    return True
+            except Exception:
+                continue
+        return False
+
+    if _try_xpath():
+        return True
+
+    try:
+        device.press("back")
+        time.sleep(0.35)
+    except Exception:
+        pass
+    if _try_xpath():
+        return True
+
+    try:
+        w, h = display_wh(device, p)
+        before = _chat_input_text(device)
+        for xr, yr in ((0.92, 0.945), (0.90, 0.935), (0.88, 0.95)):
+            cx, cy = int(w * xr), int(h * yr)
+            print(f"[发送] 坐标尝试发送 ({cx},{cy})")
+            device.click(cx, cy)
+            time.sleep(0.45)
+            after = _chat_input_text(device)
+            if not after or after in _CHAT_PLACEHOLDER_TEXTS or after != before:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def send_chat_message(
+    device: Any,
+    text: str,
+    *,
+    profile: GestureProfile | None = None,
+) -> bool:
+    """输入并发送一条聊天消息（供 FlowCrawler 调用）。"""
+    if not ensure_text_input_mode(device, profile):
+        return False
+    if not type_chat_message(device, text, profile=profile):
+        return False
+    if click_chat_send(device, profile=profile):
+        print(f"[发送] 已发送: {text[:40]}")
+        return True
+    print("[发送] 未找到发送按钮")
     return False
 
 

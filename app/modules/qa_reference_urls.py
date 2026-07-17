@@ -36,7 +36,7 @@ _LINK_URL_RE = re.compile(r"link_url=(https?://[^\s,}\]]+)")
 _HTTP_RE = re.compile(r"https?://[^\s\"'<>\\,}\]]+", re.I)
 _DAT_HTTP_RE = re.compile(r"dat=(https?://[^\s,}\]]+)", re.I)
 _SNSSDK_AWEME_RE = re.compile(
-  r"snssdk1128://aweme/detail/(\d+)",
+  r"snssdk(?:1128|1180)://aweme/detail/(\d+)",
   re.I,
 )
 _START_HTTP_RE = re.compile(
@@ -50,6 +50,14 @@ _SKIP_URL_MARKERS = (
   "example.com",
 )
 _PKG = "com.larus.nova"
+# URL 解析阶段日志（保留 reset 供后续扩展）
+_ref_list_rows_logged = False
+
+
+def reset_url_resolve_log_state() -> None:
+  """新一轮 URL 解析开始前重置日志状态。"""
+  global _ref_list_rows_logged
+  _ref_list_rows_logged = False
 
 
 def _log_url(msg: str) -> None:
@@ -128,8 +136,26 @@ def _reanchor_ref_list_after_back(
   nav: Navigator,
   *,
   tag: str,
+  quick: bool = False,
 ) -> None:
   """返回聊天页后把引用列表滚回顶部，避免落在底部误点视频。"""
+  from app.modules.navigator import Page
+
+  if quick:
+    page, _ = nav.current_page()
+    if page != Page.CHAT:
+      return
+    ref_bounds = _get_ref_list_bounds(device, profile)
+    if not ref_bounds:
+      return
+    _, h = display_wh(device, profile=profile)
+    if ref_bounds[1] <= int(h * 0.42):
+      _log_url(f"{tag} 列表已在屏上部，跳过回顶")
+      return
+    _scroll_ref_list_to_top(device, profile, rounds=2)
+    time.sleep(0.15)
+    return
+
   _log_page(nav, f"{tag} 返回后")
   ref_bounds = _get_ref_list_bounds(device, profile)
   _log_url(f"{tag} 引用列表 bounds={_format_bounds(ref_bounds)}")
@@ -140,6 +166,38 @@ def _reanchor_ref_list_after_back(
     _log_url(f"{tag} 列表回顶后 bounds={_format_bounds(ref_bounds)}")
   else:
     _log_url(f"{tag} 无引用列表容器，跳过列表回顶")
+
+
+def _return_after_fast_url_hit(
+  device: Any,
+  nav: Navigator,
+  profile: GestureProfile,
+  *,
+  ref_idx: str,
+  expected_prompt: str = "",
+) -> None:
+  """快速命中 URL 后：先收外部抖音，再回聊天；已在 CHAT 时禁止 safe_back。"""
+  from app.modules.navigator import Page
+
+  t0 = time.time()
+  nav.recover_from_external_douyin(gentle=True)
+  page, _ = nav.current_page()
+  if page == Page.WEB_DETAIL:
+    nav.lite_back_to_chat()
+    page, _ = nav.current_page()
+  if page != Page.CHAT:
+    backs = min(3, profile.qa_resolve_url_max_backs)
+    nav.safe_back_to_chat(max_backs=backs)
+  elapsed = time.time() - t0
+  if elapsed >= 1.0:
+    _log_url(f"#{ref_idx} 快速命中后回聊天 {elapsed:.1f}s")
+  _reanchor_ref_list_after_back(
+    device, profile, nav, tag=f"#{ref_idx} 快速命中", quick=True,
+  )
+  if expected_prompt:
+    _ensure_target_chat_session(
+      device, nav, profile, expected_prompt, f"#{ref_idx} 快速命中后",
+    )
 
 
 @dataclass
@@ -189,13 +247,15 @@ def _rid_matches(rid: str, full_rid: str) -> bool:
   return token in rid or full_rid in rid
 
 
-def _log_visible_ref_rows(
+def _log_target_ref_row(
   device: Any,
   *,
   expect_index: int = 0,
   root_xpath: str | None = None,
 ) -> None:
-  """打印当前屏引用列表内可见行，便于对照序号/标题。"""
+  """仅打印目标序号对应的可见行（不列举整表）。"""
+  if not expect_index:
+    return
   root = root_xpath or _detect_ref_list_root_xpath(device)
   try:
     rows = device.xpath(
@@ -204,16 +264,29 @@ def _log_visible_ref_rows(
   except Exception as exc:
     _log_url(f"列举引用行失败: {exc}")
     return
-  _log_url(f"引用列表可见行数={len(rows)} 目标=#{expect_index or '?'}")
-  for i, row in enumerate(rows[:12], start=1):
-    fp = _element_fingerprint(row)
+  for row in rows:
     idx_text, title_text = _read_row_index_and_title(device, row, root_xpath=root)
-    title_text = title_text[:60]
-    mark = " <<" if expect_index and idx_text.rstrip(".") == str(expect_index) else ""
+    if idx_text.rstrip(".") != str(expect_index):
+      continue
+    fp = _element_fingerprint(row)
     _log_url(
-      f"  行{i}{mark} index={idx_text!r} title={title_text!r} "
+      f"目标行 #{expect_index} index={idx_text!r} title={title_text[:60]!r} "
       f"bounds={_format_bounds(fp['bounds'])}"
     )
+    return
+  _log_url(f"目标行 #{expect_index} 不在当前可见 {len(rows)} 行内")
+
+
+def _log_visible_ref_rows(
+  device: Any,
+  *,
+  expect_index: int = 0,
+  root_xpath: str | None = None,
+) -> None:
+  """兼容旧调用：等同 _log_target_ref_row。"""
+  _log_target_ref_row(
+    device, expect_index=expect_index, root_xpath=root_xpath,
+  )
 
 
 def _read_row_index_and_title(
@@ -467,12 +540,12 @@ def _find_citation_click_target(
 ) -> CitationClickTarget | None:
   root_xpath = _detect_ref_list_root_xpath(device, profile)
   ref_bounds = _get_ref_list_bounds(device, profile)
+  ref_idx = citation.ref_index or "?"
   if log:
     _log_url(
-      f"查找目标 #{citation.ref_index or '?'} title={citation.title[:48]!r} "
-      f"root={root_xpath[-48:]} list={_format_bounds(ref_bounds)}"
+      f"查找 #{ref_idx} title={citation.title[:48]!r} "
+      f"list={_format_bounds(ref_bounds)}"
     )
-    _log_visible_ref_rows(device, expect_index=citation.ref_index or 0, root_xpath=root_xpath)
 
   for strategy, xp in _citation_xpath_strategies(citation, device, profile):
     try:
@@ -480,17 +553,12 @@ def _find_citation_click_target(
     except Exception:
       el = None
     if not el:
-      if log:
-        _log_url(f"策略未命中 {strategy}")
       continue
 
     click_el, click_rid = _pick_clickable_element(
       device, citation, el, root_xpath=root_xpath,
     )
     if not click_el:
-      if log:
-        fp = _element_fingerprint(el)
-        _log_element(f"策略 {strategy} 命中但不可点击", fp)
       continue
 
     fp = _element_fingerprint(click_el)
@@ -525,12 +593,8 @@ def _find_citation_click_target(
         expected_title=citation.title or "",
       )
       if not confirmed:
-        if log:
-          _log_url(f"策略 {strategy} 二次确认失败: {detail}")
         continue
       title_text = detail if isinstance(detail, str) and detail else title_text
-      if log:
-        _log_url(f"策略 {strategy} 二次确认通过 title={title_text[:40]!r}")
 
     if not _validate_citation_match(
       citation,
@@ -542,9 +606,10 @@ def _find_citation_click_target(
       continue
 
     if log:
-      _log_url(f"策略命中 {strategy} xpath={xp[:96]}")
-      _log_element("  命中节点", _element_fingerprint(el))
-      _log_element("  点击节点", fp)
+      _log_url(
+        f"命中 #{ref_idx} via {strategy} index={index_text!r} "
+        f"title={title_text[:48]!r} bounds={_format_bounds(fp['bounds'])}"
+      )
 
     return CitationClickTarget(
       strategy=strategy,
@@ -611,7 +676,250 @@ def _adb_dumpsys(serial: str | None, *args: str) -> str:
 
 
 def _iesdouyin_url(video_id: str) -> str:
-  return f"https://www.iesdouyin.com/share/video/{video_id}"
+  from app.modules.douyin_web_resolve import build_share_url
+
+  return build_share_url(video_id)
+
+
+def _douyin_url_from_id(
+  video_id: str,
+  profile: GestureProfile | None = None,
+) -> str:
+  """从 aweme_id 拼装并 PC 多格式验证，返回 best_verified 原始 URL。"""
+  from app.modules.douyin_web_resolve import (
+    build_url_from_aweme_id,
+    resolve_verified_url,
+  )
+
+  p = profile or GestureProfile()
+  raw_id = (video_id or "").strip()
+  if not raw_id:
+    return ""
+  format_ids = p.qa_douyin_web_url_formats or None
+  if not p.qa_douyin_web_validate:
+    return build_url_from_aweme_id(raw_id, format_ids=format_ids)
+  url = resolve_verified_url(
+    raw_id,
+    require_web_verify=True,
+    format_ids=format_ids,
+    min_interval_s=p.qa_douyin_web_validate_interval,
+    fallback_unverified=p.qa_douyin_web_validate_fallback,
+  )
+  if url:
+    _log_url(f"PC Web id={raw_id} → {url[:80]}")
+    return url
+  if p.qa_douyin_web_validate_fallback:
+    fb = build_url_from_aweme_id(raw_id, format_ids=format_ids)
+    _log_url(f"PC Web 验证未通过 id={raw_id}，回落 {fb[:80]}")
+    return fb
+  _log_url(f"PC Web 验证未通过 id={raw_id}，丢弃")
+  return ""
+
+
+def _iesdouyin_url_verified(
+  video_id: str,
+  profile: GestureProfile | None = None,
+) -> str:
+  """兼容旧名。"""
+  return _douyin_url_from_id(video_id, profile)
+
+
+def _finalize_douyin_url(
+  raw_url: str,
+  profile: GestureProfile | None = None,
+) -> str:
+  """
+  把真机已解析到的链接归一为偏好的抖音双前缀（jingxuan/video）。
+
+  - 含 19 位 aweme_id（来自 WebActivity/dumpsys/logcat，id 必有效）→ 按
+    profile `qa_douyin_web_url_formats` 首选前缀即时拼装，无额外 HTTP 开销。
+  - 非抖音（网页/SPU 深链等）→ 原样返回。
+  - 拼装失败兜底保留原链（笨方法保底，绝不丢链）。
+  """
+  from app.modules.douyin_web_resolve import (
+    build_url_from_aweme_id,
+    normalize_aweme_id,
+  )
+
+  raw = (raw_url or "").strip()
+  if not raw:
+    return raw
+  # 仅对抖音族链接归一，避免误伤网页/SPU（防止 web URL 中偶发长数字被当 id）
+  low = raw.lower()
+  is_douyin_like = (
+    "douyin" in low
+    or "iesdouyin" in low
+    or "snssdk" in low
+    or raw.isdigit()
+  )
+  if not is_douyin_like:
+    return raw
+  p = profile or GestureProfile()
+  aid = normalize_aweme_id(raw)
+  if not aid:
+    return raw
+  built = build_url_from_aweme_id(
+    aid, format_ids=p.qa_douyin_web_url_formats or None,
+  )
+  if built and built != raw:
+    _log_url(f"归一抖音双前缀 id={aid} → {built[:80]}")
+    return built
+  return built or raw
+
+
+def _douyin_stitch_format_ids(profile: GestureProfile) -> tuple[str, ...]:
+  """拼接验证仅试 jingxuan / video（profile 可覆盖）。"""
+  fmts = profile.qa_douyin_web_url_formats
+  if fmts:
+    return fmts
+  return ("douyin_jingxuan_modal", "douyin_video")
+
+
+def stitch_verify_douyin_url(aweme_id: str, profile: GestureProfile) -> str:
+  """
+  有 19 位 aweme_id 时拼 jingxuan/video，并用 HTTP 模拟请求快验。
+  验证失败且 fallback 开启时仍返回首个拼接 URL（不丢链）。
+  """
+  from app.modules.douyin_web_resolve import (
+    build_url_from_aweme_id,
+    normalize_aweme_id,
+    validate_aweme_multi_format,
+  )
+
+  aid = normalize_aweme_id(aweme_id)
+  if not aid:
+    return ""
+  format_ids = _douyin_stitch_format_ids(profile)
+  if profile.qa_douyin_web_validate:
+    result = validate_aweme_multi_format(
+      aid,
+      format_ids=format_ids,
+      min_interval_s=profile.qa_douyin_web_validate_interval,
+    )
+    if result.verified and result.share_url:
+      _log_url(
+        f"拼接验证通过 id={aid} fmt={result.format_id}: {result.share_url[:80]}"
+      )
+      return result.share_url
+    if profile.qa_douyin_web_validate_fallback:
+      fb = build_url_from_aweme_id(aid, format_ids=format_ids)
+      _log_url(f"拼接验证未过 id={aid}，回落 {fb[:80]} ({result.note})")
+      return fb
+    _log_url(f"拼接验证未过 id={aid}，丢弃 ({result.note})")
+    return ""
+  fb = build_url_from_aweme_id(aid, format_ids=format_ids)
+  if fb:
+    _log_url(f"拼接 id={aid} → {fb[:80]}（未开 HTTP 验证）")
+  return fb
+
+
+def _gather_aweme_id_on_screen(
+  *,
+  serial: str | None,
+  stream: LogcatStream | None,
+  ref_idx: str,
+) -> str:
+  """点击后同屏从 logcat/dumpsys 抽 aweme_id（不进抖音也可）。"""
+  from app.modules.douyin_web_resolve import normalize_aweme_id
+
+  chunks: list[str] = []
+  if stream is not None:
+    chunks.append(stream.text_since_mark())
+  chunks.append(dump_logcat_tail(serial=serial, count=200))
+  try:
+    chunks.append(_adb_dumpsys(serial, "activity", "activities"))
+    chunks.append(_adb_dumpsys(serial, "activity", "top"))
+  except Exception:
+    pass
+  merged = "\n".join(chunks)
+  ids = extract_aweme_ids_ordered(merged)
+  if ids:
+    _log_url(f"#{ref_idx} 同屏 aweme_id={ids[0]}")
+    return ids[0]
+  for u in extract_urls_from_dumpsys_text(merged):
+    aid = normalize_aweme_id(u)
+    if aid:
+      _log_url(f"#{ref_idx} 同屏 URL→aweme_id={aid}")
+      return aid
+  return ""
+
+
+def _try_douyin_click_in_for_url(
+  device: Any,
+  nav: Navigator,
+  profile: GestureProfile,
+  *,
+  serial: str | None,
+  stream: LogcatStream | None,
+  ref_idx: str,
+) -> str:
+  """豆包 Web 未抽到 id 时，允许点进抖音 App 再收 aweme_id 并拼接验证。"""
+  from app.modules.navigator import Page
+
+  _log_url(f"#{ref_idx} 抖音 Web 未得 id，尝试点进 App")
+  page_now, _ = nav.current_page()
+  if profile.qa_resolve_accept_app_jump:
+    nav.wait_and_accept_app_jump(timeout=6.0)
+  if page_now == Page.CHAT:
+    time.sleep(0.8)
+  nav.wait_for_aweme_foreground(timeout=8.0)
+  timeout = min(10.0, max(6.0, profile.qa_resolve_batch_douyin_timeout))
+  ids = collect_aweme_ids_after_open(
+    stream=stream,
+    serial=serial,
+    timeout_s=timeout,
+  )
+  url = ""
+  if ids:
+    url = stitch_verify_douyin_url(ids[0], profile)
+    if url:
+      _log_url(f"#{ref_idx} 点进后 id={ids[0]} → {url[:96]}")
+  nav.recover_from_external_douyin(gentle=True)
+  nav.lite_back_to_chat()
+  return url
+
+
+def _apply_douyin_stitch_after_click(
+  url: str,
+  *,
+  device: Any,
+  nav: Navigator,
+  profile: GestureProfile,
+  serial: str | None,
+  stream: LogcatStream | None,
+  citation: Citation,
+  ref_idx: str,
+  method: ResolveMethod,
+) -> str:
+  """同屏抽 id 拼接验证；抖音条仍无链则点进 App。"""
+  from app.modules.douyin_web_resolve import is_douyin_video_url, normalize_aweme_id
+
+  aid = normalize_aweme_id(url) if url else ""
+  if not aid:
+    aid = _gather_aweme_id_on_screen(
+      serial=serial, stream=stream, ref_idx=ref_idx,
+    )
+  if aid:
+    stitched = stitch_verify_douyin_url(aid, profile)
+    if stitched:
+      return stitched
+  if url and not is_douyin_video_url(url):
+    return url
+  if not is_likely_douyin_citation(citation) and not aid:
+    return url
+  if url and is_douyin_video_url(url):
+    return _finalize_douyin_url(url, profile)
+  if method not in ("auto", "logcat", "dumpsys"):
+    return url
+  click_in = _try_douyin_click_in_for_url(
+    device,
+    nav,
+    profile,
+    serial=serial,
+    stream=stream,
+    ref_idx=ref_idx,
+  )
+  return click_in or url
 
 
 def extract_urls_from_dumpsys_text(text: str) -> list[str]:
@@ -656,7 +964,9 @@ def extract_urls_from_logcat_text(text: str) -> list[str]:
   for m in _START_HTTP_RE.finditer(text):
     _add(m.start(), m.group(1))
   for m in _SNSSDK_AWEME_RE.finditer(text):
-    _add(m.start(), _iesdouyin_url(m.group(1)))
+    from app.modules.douyin_web_resolve import build_url_from_aweme_id
+
+    _add(m.start(), build_url_from_aweme_id(m.group(1)))
   for m in _HTTP_RE.finditer(text):
     _add(m.start(), m.group(0).rstrip(".,)"))
 
@@ -701,6 +1011,37 @@ def extract_aweme_ids_ordered(text: str) -> list[str]:
   return out
 
 
+def collect_aweme_ids_after_open(
+  *,
+  stream: LogcatStream | None,
+  serial: str | None,
+  timeout_s: float = 12.0,
+  poll_interval_s: float = 0.25,
+  expected_count: int = 0,
+) -> list[str]:
+  """点击并允许打开抖音后，从 logcat 流 / tail / dumpsys 收集 aweme id。"""
+  deadline = time.time() + timeout_s
+  best: list[str] = []
+  while time.time() < deadline:
+    chunks: list[str] = []
+    if stream is not None:
+      chunks.append(stream.text_since_mark())
+    chunks.append(dump_logcat_tail(serial=serial, count=300))
+    try:
+      chunks.append(_adb_dumpsys(serial, "activity", "activities"))
+      chunks.append(_adb_dumpsys(serial, "activity", "top"))
+    except Exception:
+      pass
+    merged = "\n".join(chunks)
+    ids = extract_aweme_ids_ordered(merged)
+    if len(ids) > len(best):
+      best = ids
+    if expected_count and validate_batch_douyin_ids(ids, expected_count):
+      return ids
+    time.sleep(poll_interval_s)
+  return best
+
+
 def validate_batch_douyin_ids(ids: list[str], expected_count: int) -> bool:
   """批量回填前校验：数量一致且 id 互不重复。"""
   if expected_count <= 0:
@@ -712,13 +1053,19 @@ def validate_batch_douyin_ids(ids: list[str], expected_count: int) -> bool:
 
 def is_likely_douyin_citation(citation: Citation) -> bool:
   """启发式判断引用是否更可能为抖音视频（非网页）。"""
+  from app.modules.douyin_web_resolve import is_douyin_video_url
+
   src = (citation.source or "").lower()
   if "抖音" in src or "douyin" in src:
     return True
   title = citation.title or ""
-  if citation.url and "iesdouyin.com" in citation.url:
+  if citation.url and is_douyin_video_url(citation.url):
     return True
   if "#" in title and not citation.source:
+    return True
+  if "|||" in title:
+    return True
+  if "！！" in title and len(title) < 120:
     return True
   lowered = title.lower()
   if any(k in lowered for k in ("douyin", "aweme", "抖音视频")):
@@ -747,6 +1094,11 @@ _WEB_CITATION_MARKERS = (
   "报价",
   "评测",
   "导购",
+  "新闻网",
+  "大河网",
+  "凤凰网",
+  "苏宁易购",
+  "suning.com",
 )
 
 
@@ -761,6 +1113,247 @@ def looks_like_web_citation(citation: Citation) -> bool:
     if any(k in src for k in ("网", "科技", "之家", "在线", "论坛")):
       return True
   return False
+
+
+def _ensure_chat_after_resolve(
+  device: Any,
+  nav: Navigator,
+  profile: GestureProfile,
+  *,
+  tag: str,
+) -> bool:
+  """
+  解析单条后稳健回到聊天页（兼容荣耀等较慢机型的 WebActivity/评论页多层回退）。
+
+  lite_back 一次不够时，温和回豆包 + safe_back 循环补齐，避免误判漂移触发重启。
+  """
+  from app.modules.navigator import Page
+
+  p, _ = nav.current_page()
+  if p == Page.CHAT:
+    return True
+  nav.lite_back_to_chat()
+  p, _ = nav.current_page()
+  if p == Page.CHAT:
+    return True
+  _log_url(f"{tag} lite_back 未回聊天页({p.name})，safe_back 兜底")
+  nav.recover_from_external_douyin(gentle=True)
+  nav.safe_back_to_chat(max_backs=profile.qa_resolve_url_max_backs)
+  p, _ = nav.current_page()
+  return p == Page.CHAT
+
+
+# 会话恢复时用于在会话抽屉里辨识目标会话的回答正文片段（唯一性强于标题摘要）
+_EXPECTED_ANSWER_SNIPPET: str = ""
+
+
+def set_expected_answer_snippet(text: str) -> None:
+  """由采集主流程在 URL 解析前设置：目标会话回答正文的可辨识片段。"""
+  global _EXPECTED_ANSWER_SNIPPET
+  _EXPECTED_ANSWER_SNIPPET = (text or "").strip()
+
+
+def _apply_session_guard_env(profile: GestureProfile) -> None:
+  """环境变量覆盖 URL 解析提速项（无需改 profile 即可切换 60710 轻量模式）。
+
+  QA_URL_SESSION_GUARD=0 → 关闭错位校验/恢复。
+  QA_URL_SESSION_RECONFIRM=0 → 关闭二次确认。
+  QA_URL_SKIP_BRUTE=0 → 快速逐条后对剩余无 URL 条目跑笨办法补齐。
+  QA_URL_SKIP_BRUTE=1 → 快速逐条后不跑笨办法补齐。
+  QA_URL_PHASE_BUDGET_SEC=0 → 关闭 URL 阶段 wall-clock 上限。
+  QA_URL_SIMPLE=0 → 三阶段（批量抖音可选 → 快速逐条 → 笨办法补齐）。
+  QA_URL_SIMPLE=1 → 60710 单遍 URL（logcat→dumpsys→lite_back，无笨办法第二遍）。
+  QA_URL_SKIP_DOUYIN=0 → 不跳过抖音引用（逐条点击取视频链）。
+  QA_DOUYIN_STITCH_VERIFY=1 → aweme_id 拼 jingxuan/video 并 HTTP 快验。
+  """
+  import os
+
+  skip_douyin = os.environ.get("QA_URL_SKIP_DOUYIN", "").strip().lower()
+  if skip_douyin in ("0", "false", "no", "off"):
+    profile.qa_resolve_skip_douyin_per_click = False
+    print("[问答] 抖音引用不跳过（QA_URL_SKIP_DOUYIN=0，逐条取视频链）")
+  elif skip_douyin in ("1", "true", "yes", "on"):
+    profile.qa_resolve_skip_douyin_per_click = True
+
+  stitch = os.environ.get("QA_DOUYIN_STITCH_VERIFY", "").strip().lower()
+  if stitch in ("1", "true", "yes", "on"):
+    profile.qa_douyin_web_validate = True
+    profile.qa_douyin_web_url_formats = (
+      "douyin_jingxuan_modal",
+      "douyin_video",
+    )
+    print("[问答] 抖音拼接 HTTP 快验已开启（jingxuan/video）")
+  elif stitch in ("0", "false", "no", "off"):
+    profile.qa_douyin_web_validate = False
+
+  simple = os.environ.get("QA_URL_SIMPLE", "").strip().lower()
+  if simple in ("1", "true", "yes", "on"):
+    profile.qa_resolve_simple_mode = True
+    print("[问答] URL 单遍模式（QA_URL_SIMPLE=1，60710 流程）")
+  elif simple in ("0", "false", "no", "off"):
+    profile.qa_resolve_simple_mode = False
+    print("[问答] URL 全量模式（快速逐条 + 笨办法补齐，QA_URL_SIMPLE=0）")
+
+  guard = os.environ.get("QA_URL_SESSION_GUARD", "").strip().lower()
+  if guard in ("0", "false", "no", "off"):
+    profile.qa_resolve_session_guard = False
+    print("[问答] 会话守卫已关闭（QA_URL_SESSION_GUARD=0，60710 轻量模式）")
+  elif guard in ("1", "true", "yes", "on"):
+    profile.qa_resolve_session_guard = True
+
+  reconfirm = os.environ.get("QA_URL_SESSION_RECONFIRM", "").strip().lower()
+  if reconfirm in ("0", "false", "no", "off"):
+    profile.qa_resolve_session_guard_reconfirm = False
+  elif reconfirm in ("1", "true", "yes", "on"):
+    profile.qa_resolve_session_guard_reconfirm = True
+
+  skip_brute = os.environ.get("QA_URL_SKIP_BRUTE", "").strip().lower()
+  if skip_brute in ("1", "true", "yes", "on"):
+    profile.qa_resolve_skip_brute_pass = True
+    print("[问答] 已跳过笨办法补齐（QA_URL_SKIP_BRUTE=1）")
+  elif skip_brute in ("0", "false", "no", "off"):
+    profile.qa_resolve_skip_brute_pass = False
+    print("[问答] 笨办法补齐已开启（QA_URL_SKIP_BRUTE=0，未解析条目将逐条重点击）")
+
+  budget = os.environ.get("QA_URL_PHASE_BUDGET_SEC", "").strip()
+  if budget:
+    try:
+      profile.qa_resolve_url_phase_budget_sec = float(budget)
+      if float(budget) <= 0:
+        print("[问答] URL 阶段预算已关闭（QA_URL_PHASE_BUDGET_SEC=0）")
+    except ValueError:
+      pass
+
+
+def _chat_context_ok(
+  device: Any,
+  expected_prompt: str,
+  profile: GestureProfile,
+  tag: str,
+) -> bool:
+  """
+  URL 解析期会话校验（宽松）：仅当屏上出现另一条不同提问时判定错位。
+
+  引用解析途中问题气泡本就滚出屏幕，读不到用户气泡不算证据，避免误杀空转。
+  目标回答正文锚点仍在屏上时视为未错位。
+
+  - `qa_resolve_session_guard=False`：完全跳过（60710 轻量模式，不校验不恢复）。
+  - 判定错位前默认二次确认：单次 hierarchy dump 可能残缺，隔一小段再读一次，
+    两次都冲突才判错位，消除瞬时误判导致的空转/强杀。
+  """
+  if not (expected_prompt or "").strip():
+    return True
+  if not getattr(profile, "qa_resolve_session_guard", True):
+    return True
+  from app.modules.chat_ui_heuristics import chat_prompt_conflicts
+
+  conflict, visible = chat_prompt_conflicts(
+    device,
+    expected_prompt,
+    profile=profile,
+    answer_snippet=_EXPECTED_ANSWER_SNIPPET,
+  )
+  if not conflict:
+    return True
+
+  if getattr(profile, "qa_resolve_session_guard_reconfirm", True):
+    time.sleep(
+      max(0.0, getattr(profile, "qa_resolve_session_guard_reconfirm_sleep", 0.6))
+    )
+    conflict2, visible2 = chat_prompt_conflicts(
+      device,
+      expected_prompt,
+      profile=profile,
+      answer_snippet=_EXPECTED_ANSWER_SNIPPET,
+    )
+    if not conflict2:
+      _log_url(f"{tag} 会话错位二次确认为误判（屏上 {visible[:24]!r}），忽略")
+      return True
+    visible = visible2 or visible
+
+  print(
+    f"[问答] URL解析会话错位({tag})：期望 {expected_prompt[:40]!r}，"
+    f"屏上 {visible[:40]!r}（疑似落入历史会话）"
+  )
+  return False
+
+
+def _reenter_target_chat(
+  nav: Navigator,
+  expected_prompt: str,
+  *,
+  tag: str,
+) -> bool:
+  """按回答片段 / prompt 重进目标会话（不 back，避免误退当前 CHAT）。"""
+  snippet = _EXPECTED_ANSWER_SNIPPET
+  nav.dismiss_conversation_search()
+  if nav.reenter_chat_by_prompt(expected_prompt, snippet):
+    print(f"[问答] 已重进目标会话 ({tag})")
+    return True
+  return False
+
+
+def _ensure_target_chat_session(
+  device: Any,
+  nav: Navigator,
+  profile: GestureProfile,
+  expected_prompt: str,
+  tag: str,
+) -> bool:
+  """
+  抖音/Web 返回后确保仍在目标会话。
+
+  已在 CHAT 但错位时直接重进，禁止 safe_back（易误退到历史会话）。
+  """
+  if not (expected_prompt or "").strip():
+    return True
+  if _chat_context_ok(device, expected_prompt, profile, tag):
+    return True
+
+  from app.modules.navigator import Page
+
+  page, _ = nav.current_page()
+  if page != Page.CHAT:
+    nav.recover_from_external_douyin(gentle=True)
+    nav.lite_back_to_chat()
+    page, _ = nav.current_page()
+    if page != Page.CHAT:
+      nav.safe_back_to_chat(max_backs=profile.qa_resolve_url_max_backs)
+    if _chat_context_ok(device, expected_prompt, profile, f"{tag} 回聊天"):
+      return True
+
+  if _reenter_target_chat(nav, expected_prompt, tag=tag):
+    _reanchor_ref_list_after_back(device, profile, nav, tag=f"{tag} 重进")
+    return _chat_context_ok(device, expected_prompt, profile, f"{tag} 重进后")
+  return False
+
+
+def _recover_chat_context(
+  device: Any,
+  nav: Navigator,
+  profile: GestureProfile,
+  expected_prompt: str,
+  tag: str,
+) -> bool:
+  """会话错位时逐级恢复：重进 → 非 CHAT 时 safe_back → 强杀重启兜底。"""
+  if not (expected_prompt or "").strip():
+    return True
+  if _chat_context_ok(device, expected_prompt, profile, tag):
+    return True
+  print(f"[问答] 尝试恢复会话 ({tag})")
+
+  if _ensure_target_chat_session(device, nav, profile, expected_prompt, tag):
+    print(f"[问答] 会话已恢复 ({tag})")
+    return True
+
+  nav.hard_restart_app(reason=f"URL解析会话错位({tag})")
+  time.sleep(2.0)
+  if _reenter_target_chat(nav, expected_prompt, tag=f"{tag} 重启后"):
+    _reanchor_ref_list_after_back(device, profile, nav, tag=f"{tag} 重启后")
+  ok = _chat_context_ok(device, expected_prompt, profile, f"{tag} 重启后")
+  if ok:
+    print(f"[问答] 会话已恢复 ({tag}，重启)")
+  return ok
 
 
 def classify_citation_channel(citation: Citation) -> CitationChannel:
@@ -834,37 +1427,38 @@ def poll_logcat_stream_for_aweme_ids(
   return best if validate_batch_douyin_ids(best, expected_count) else []
 
 
-def apply_batch_douyin_urls(citations: list[Citation], indices: list[int], ids: list[str]) -> None:
+def apply_batch_douyin_urls(
+  citations: list[Citation],
+  indices: list[int],
+  ids: list[str],
+  *,
+  profile: GestureProfile | None = None,
+) -> None:
   """按 citations 列表顺序将批量 id 写回对应条目。"""
   for idx, vid in zip(indices, ids):
-    citations[idx].url = _iesdouyin_url(vid)
+    citations[idx].url = _douyin_url_from_id(vid, profile)
 
 
-def _chat_context_ok(
+def _return_from_douyin_resolve(
   device: Any,
-  expected_prompt: str,
+  nav: Navigator,
   profile: GestureProfile,
-  tag: str,
+  *,
+  expected_prompt: str = "",
 ) -> bool:
-  """
-  URL 解析期会话校验（宽松）：仅当屏上出现另一条不同提问时判定错位。
-
-  引用解析途中问题气泡本就滚出屏幕，读不到用户气泡不算证据，避免误杀空转。
-  """
-  if not (expected_prompt or "").strip():
-    return True
-  from app.modules.chat_ui_heuristics import chat_prompt_conflicts
-
-  conflict, visible = chat_prompt_conflicts(
-    device, expected_prompt, profile=profile,
-  )
-  if not conflict:
-    return True
-  print(
-    f"[问答] URL解析会话错位({tag})：期望 {expected_prompt[:40]!r}，"
-    f"屏上 {visible[:40]!r}（疑似落入历史会话）"
-  )
-  return False
+  """从抖音温和回豆包，校验会话，必要时按 prompt 重进。"""
+  nav.recover_from_external_douyin(gentle=True)
+  time.sleep(profile.qa_resolve_url_post_back_sleep)
+  _reanchor_ref_list_after_back(device, profile, nav, tag="抖音批量后")
+  if expected_prompt and not _chat_context_ok(
+    device, expected_prompt, profile, "抖音批量后",
+  ):
+    if _reenter_target_chat(nav, expected_prompt, tag="抖音批量后"):
+      _reanchor_ref_list_after_back(device, profile, nav, tag="重进会话后")
+      return _chat_context_ok(device, expected_prompt, profile, "重进会话")
+    print("[问答] 抖音返回后会话错位且重进失败")
+    return False
+  return True
 
 
 def try_batch_resolve_douyin(
@@ -874,11 +1468,16 @@ def try_batch_resolve_douyin(
   nav: Navigator,
   profile: GestureProfile,
   stream: LogcatStream,
+  expected_prompt: str = "",
+  sms_token: str = "",
+  sms_device_id: str = "",
 ) -> bool:
   """
   点开首条抖音引用进入 feed，从 logcat 批量抓齐 aweme id 并按序回填。
   校验不通过返回 False，由调用方回落逐条解析。
   """
+  from app.modules.douyin_handoff import try_resolve_douyin_after_click
+
   douyin_indices = [
     i for i, c in enumerate(citations) if not c.url and is_likely_douyin_citation(c)
   ]
@@ -896,25 +1495,85 @@ def try_batch_resolve_douyin(
     print("[问答] 抖音批量：首条引用点击失败")
     return False
 
-  ids = poll_logcat_stream_for_aweme_ids(
-    stream,
-    expected_count=len(douyin_indices),
-    timeout_s=profile.qa_resolve_batch_douyin_timeout,
-    poll_interval_s=profile.qa_logcat_stream_poll_interval,
+  time.sleep(0.4)
+  serial = _device_serial(device)
+  douyin_count = len(douyin_indices)
+  if profile.qa_douyin_web_validate:
+    feed_swipes = 0
+  elif profile.qa_resolve_accept_app_jump:
+    feed_swipes = max(3, min(douyin_count, 8))
+  else:
+    feed_swipes = 0
+  url, ids = try_resolve_douyin_after_click(
+    device,
+    nav,
+    profile,
+    serial=serial,
+    stream=stream,
+    sms_token=sms_token,
+    sms_device_id=sms_device_id,
+    batch_feed_swipes=feed_swipes,
+    for_batch=True,
   )
-  _log_url(f"抖音批量 logcat ids={len(ids)} 期望={len(douyin_indices)}")
-  nav.safe_back_to_chat(max_backs=profile.qa_resolve_url_max_backs)
-  time.sleep(profile.qa_resolve_url_post_back_sleep)
-  _reanchor_ref_list_after_back(device, profile, nav, tag="抖音批量后")
+  nav.recover_from_external_douyin(gentle=True)
 
-  if validate_batch_douyin_ids(ids, len(douyin_indices)):
-    apply_batch_douyin_urls(citations, douyin_indices, ids)
-    print(f"[问答] 抖音批量回填 {len(douyin_indices)} 条引用 URL")
+  def _apply_batch_if_complete(id_list: list[str]) -> bool:
+    if not validate_batch_douyin_ids(id_list, douyin_count):
+      return False
+    apply_batch_douyin_urls(citations, douyin_indices, id_list, profile=profile)
+    if profile.qa_douyin_web_validate:
+      print(f"[问答] 抖音批量 PC Web 验证回填 {douyin_count} 条")
+    elif url:
+      print(f"[问答] 抖音深链/Handoff 批量回填 {douyin_count} 条")
+    else:
+      print(f"[问答] 抖音批量回填 {douyin_count} 条引用 URL")
+    _return_from_douyin_resolve(device, nav, profile, expected_prompt=expected_prompt)
+    return True
+
+  if _apply_batch_if_complete(ids):
+    return True
+
+  if (
+    profile.qa_resolve_accept_app_jump
+    and not profile.qa_douyin_web_validate
+    and not validate_batch_douyin_ids(ids, douyin_count)
+  ):
+    nav.wait_and_accept_app_jump(timeout=8.0)
+    if nav.wait_for_aweme_foreground(timeout=12.0):
+      try:
+        w, h = device.window_size()
+        swipe_n = max(3, min(douyin_count, 8))
+        for _ in range(swipe_n):
+          device.swipe(int(w * 0.5), int(h * 0.72), int(w * 0.5), int(h * 0.38), 0.35)
+          time.sleep(1.0)
+      except Exception:
+        pass
+    elif nav.is_app_jump_prompt():
+      _log_url("抖音批量：跳转弹窗仍在，保存 hierarchy 供排查")
+      try:
+        device.dump_hierarchy()
+      except Exception:
+        pass
+
+  batch_timeout = max(profile.qa_resolve_batch_douyin_timeout, 18.0)
+  ids = collect_aweme_ids_after_open(
+    stream=stream,
+    serial=serial,
+    timeout_s=batch_timeout,
+    poll_interval_s=profile.qa_logcat_stream_poll_interval,
+    expected_count=douyin_count,
+  )
+  _log_url(f"抖音批量 logcat ids={len(ids)} 期望={douyin_count}")
+  _return_from_douyin_resolve(device, nav, profile, expected_prompt=expected_prompt)
+
+  if _apply_batch_if_complete(ids):
     return True
 
   if len(ids) >= 2:
     apply_count = min(len(ids), len(douyin_indices))
-    apply_batch_douyin_urls(citations, douyin_indices[:apply_count], ids[:apply_count])
+    apply_batch_douyin_urls(
+      citations, douyin_indices[:apply_count], ids[:apply_count], profile=profile,
+    )
     print(
       f"[问答] 抖音批量部分回填 {apply_count}/{len(douyin_indices)} 条"
       f"（剩余走逐条 logcat/dumpsys）"
@@ -1128,16 +1787,16 @@ def _click_citation(
   *,
   profile: GestureProfile | None = None,
 ) -> bool:
-  target = _find_citation_click_target(device, citation, log=True, profile=profile)
+  target = _find_citation_click_target(
+    device,
+    citation,
+    log=True,
+    profile=profile,
+  )
   if not target:
     _log_url(f"拒绝点击 #{citation.ref_index or '?'}：无精确元素匹配（禁止坐标点击）")
     return False
 
-  _log_url(
-    f"执行点击 #{citation.ref_index or '?'} "
-    f"strategy={target.strategy} click_rid={target.click_rid.rsplit('/', 1)[-1]} "
-    f"index={target.index_text!r} title={target.title_text[:56]!r}"
-  )
   try:
     target.element.click()
     _log_url(f"点击成功 #{citation.ref_index or '?'} via {target.strategy}")
@@ -1422,6 +2081,14 @@ def prepare_citations_for_url_resolve(
   hits = _refresh_bounds_from_hierarchy(device, citations)
   missing = sum(1 for c in citations if not c.bounds)
   print(f"[问答] 引用 bounds 刷新: {hits}/{len(citations)} 条可见")
+  global _ref_list_rows_logged
+  if not _ref_list_rows_logged and citations:
+    first_idx = next((c.ref_index for c in citations if c.ref_index), 0)
+    _log_url(f"引用列表待解析 {len(citations)} 条，首条=#{first_idx or '?'}")
+    if first_idx:
+      root = _detect_ref_list_root_xpath(device, profile)
+      _log_target_ref_row(device, expect_index=first_idx, root_xpath=root)
+    _ref_list_rows_logged = True
   for pass_i in range(profile.qa_resolve_prepare_list_passes):
     if missing <= 0:
       break
@@ -1456,6 +2123,414 @@ def _refresh_citation_bounds(
     pass
 
 
+def _try_fast_url_after_click(
+  device: Any,
+  nav: Navigator,
+  *,
+  profile: GestureProfile,
+  serial: str | None,
+  stream: LogcatStream | None,
+  method: ResolveMethod,
+  ref_idx: str,
+  channel: CitationChannel,
+) -> str:
+  """快速路径：logcat aweme_id / link_url 优先，仅短 dumpsys；不做加长重试。"""
+  from app.modules.navigator import Page
+
+  logcat_timeout = profile.qa_resolve_logcat_poll_timeout
+  short_dumpsys = min(0.6, profile.qa_resolve_url_wait * 0.35)
+
+  time.sleep(0.2)
+
+  if stream is not None and method in ("auto", "logcat"):
+    ids = extract_aweme_ids_ordered(stream.text_since_mark())
+    if ids:
+      url = _douyin_url_from_id(ids[0], profile)
+      if url:
+        _log_url(f"#{ref_idx} 快速 logcat id={ids[0]} → {url[:96]}")
+        return url
+    url = poll_logcat_stream_for_url(
+      stream,
+      timeout_s=logcat_timeout,
+      poll_interval_s=profile.qa_resolve_logcat_poll_interval,
+    )
+    if url:
+      _log_url(f"#{ref_idx} 快速 logcat url → {url[:96]}")
+      return url
+
+  page_now, _ = nav.current_page()
+  if page_now == Page.WEB_DETAIL and method in ("auto", "logcat", "dumpsys"):
+    if stream is not None:
+      ids = extract_aweme_ids_ordered(stream.text_since_mark())
+      if ids:
+        url = _douyin_url_from_id(ids[0], profile)
+        if url:
+          _log_url(
+            f"#{ref_idx} 快速 WebActivity logcat id={ids[0]} → {url[:96]}"
+          )
+          return url
+    url = resolve_url_via_dumpsys(device, serial=serial, wait_s=short_dumpsys)
+    if url:
+      _log_url(f"#{ref_idx} 快速 WebActivity dumpsys → {url[:96]}")
+      return url
+
+  if (
+    channel == "douyin"
+    and profile.qa_douyin_web_validate
+    and stream is not None
+    and method in ("auto", "logcat")
+  ):
+    ids = extract_aweme_ids_ordered(stream.text_since_mark())
+    if ids:
+      url = _douyin_url_from_id(ids[0], profile)
+      if url:
+        _log_url(f"#{ref_idx} 快速 PC Web logcat id={ids[0]} → {url[:96]}")
+        return url
+
+  return ""
+
+
+def _try_restore_ref_panel(
+  device: Any,
+  nav: Navigator,
+  profile: GestureProfile,
+  *,
+  ref_idx: str,
+) -> bool:
+  """引用列表容器消失时，在 CHAT 内上滚尝试恢复思考面板（禁止 back）。"""
+  from app.modules.navigator import Page
+
+  if _get_ref_list_bounds(device, profile) is not None:
+    return True
+  _log_url(f"#{ref_idx} 引用列表不可见，CHAT 内上滚恢复面板")
+  for round_i in range(5):
+    if _get_ref_list_bounds(device, profile) is not None:
+      _log_url(f"#{ref_idx} 引用列表已恢复（上滚 {round_i} 次）")
+      return True
+    page, _ = nav.current_page()
+    if page != Page.CHAT:
+      return False
+    _scroll_chat_up(device, profile)
+    time.sleep(0.28)
+  return _get_ref_list_bounds(device, profile) is not None
+
+
+def _after_fast_miss(
+  device: Any,
+  nav: Navigator,
+  profile: GestureProfile,
+  *,
+  ref_idx: str,
+  expected_prompt: str = "",
+) -> None:
+  """快速路径未命中：已在 CHAT 时禁止 lite_back（会误退会话），仅校验/恢复面板。"""
+  from app.modules.navigator import Page
+
+  page, _ = nav.current_page()
+  if page == Page.CHAT:
+    _log_url(f"#{ref_idx} 快速未命中且仍在 CHAT，跳过 back")
+    if expected_prompt and not _chat_context_ok(
+      device, expected_prompt, profile, f"#{ref_idx} 快速未命中",
+    ):
+      _log_url(f"#{ref_idx} 会话错位，尝试按 prompt 恢复")
+      _ensure_target_chat_session(
+        device, nav, profile, expected_prompt, f"#{ref_idx} 快速未命中",
+      )
+    else:
+      _try_restore_ref_panel(device, nav, profile, ref_idx=ref_idx)
+    time.sleep(profile.qa_resolve_url_post_back_sleep * 0.5)
+    return
+  _back_to_chat_after_resolve(
+    device, nav, profile, ref_idx=ref_idx, expected_prompt=expected_prompt,
+  )
+
+
+def _back_to_chat_after_resolve(
+  device: Any,
+  nav: Navigator,
+  profile: GestureProfile,
+  *,
+  ref_idx: str,
+  expected_prompt: str = "",
+  tag: str = "",
+) -> None:
+  """单条解析结束（成功或失败）后回到聊天页。"""
+  from app.modules.navigator import Page
+
+  page, _ = nav.current_page()
+  if page == Page.CHAT:
+    _log_url(f"#{ref_idx} 已在 CHAT，跳过 lite_back")
+    if expected_prompt:
+      _ensure_target_chat_session(
+        device, nav, profile, expected_prompt, f"#{ref_idx} 返回后",
+      )
+    else:
+      _try_restore_ref_panel(device, nav, profile, ref_idx=ref_idx)
+    time.sleep(profile.qa_resolve_url_post_back_sleep)
+    return
+
+  _log_url(f"#{ref_idx} 准备返回聊天页")
+  nav.recover_from_external_douyin(gentle=True)
+  nav.lite_back_to_chat()
+  page, _ = nav.current_page()
+  if page != Page.CHAT:
+    _log_url(f"#{ref_idx} lite_back 未到聊天页({page.name})，safe_back")
+    nav.safe_back_to_chat(max_backs=profile.qa_resolve_url_max_backs)
+  _reanchor_ref_list_after_back(
+    device, profile, nav, tag=tag or f"#{ref_idx} 解析后",
+  )
+  time.sleep(profile.qa_resolve_url_post_back_sleep)
+  if expected_prompt:
+    _ensure_target_chat_session(
+      device, nav, profile, expected_prompt, f"#{ref_idx} 返回后",
+    )
+
+
+def _resolve_one_citation_url_simple(
+  device: Any,
+  citation: Citation,
+  *,
+  nav: Navigator,
+  profile: GestureProfile,
+  serial: str | None,
+  method: ResolveMethod,
+  stream: LogcatStream | None = None,
+  recent_logcat_urls: list[str] | None = None,
+) -> str:
+  """60710 单遍：mark → 点击 → logcat → 同屏 dumpsys → lite_back（无 handoff/会话恢复）。"""
+  from app.modules.navigator import Page
+
+  serial = serial or _device_serial(device)
+  ref_idx = citation.ref_index or "?"
+  _log_page(nav, f"#{ref_idx} 解析前")
+  _log_url(
+    f"开始解析 #{ref_idx} method={method} "
+    f"douyin={is_likely_douyin_citation(citation)} title={citation.title[:48]!r}"
+  )
+
+  if stream is not None:
+    stream.mark()
+  else:
+    clear_logcat(serial=serial)
+    time.sleep(profile.qa_logcat_stream_settle)
+
+  _refresh_citation_bounds(device, citation, profile=profile)
+
+  if not _click_citation(device, citation, profile=profile):
+    _log_url(f"#{ref_idx} 首次点击失败，滚列表后重试")
+    clicked = (
+      _ensure_citation_visible(device, citation, profile)
+      and _click_citation(device, citation, profile=profile)
+    )
+    if not clicked:
+      _log_url(f"#{ref_idx} 点击失败，放弃")
+      return ""
+
+  _log_page(nav, f"#{ref_idx} 点击后")
+
+  if stream is not None and method in ("auto", "logcat"):
+    url = poll_logcat_stream_for_url(
+      stream,
+      timeout_s=profile.qa_resolve_logcat_poll_timeout,
+      poll_interval_s=profile.qa_resolve_logcat_poll_interval,
+    )
+  else:
+    url = resolve_url_after_click(
+      device,
+      serial=serial,
+      method=method if method != "net" else "auto",
+      profile=profile,
+    )
+
+  if url:
+    _log_url(f"#{ref_idx} logcat 命中 URL: {url[:96]}")
+  else:
+    _log_url(f"#{ref_idx} logcat 未命中")
+
+  if (
+    url
+    and recent_logcat_urls is not None
+    and url in recent_logcat_urls[-3:]
+    and method in ("auto", "logcat")
+  ):
+    _log_url(f"#{ref_idx} 重复 URL 丢弃: {url[:80]}")
+    url = ""
+
+  if not url and method in ("auto", "logcat"):
+    url = resolve_url_via_dumpsys(device, serial=serial, wait_s=0.6)
+    if url:
+      _log_url(f"#{ref_idx} dumpsys 同屏命中: {url[:96]}")
+    else:
+      _log_url(f"#{ref_idx} dumpsys 同屏未命中")
+
+  if not url and method in ("auto", "logcat"):
+    page_now, _ = nav.current_page()
+    if page_now in (Page.WEB_DETAIL, Page.OTHER_APP):
+      _log_url(f"#{ref_idx} 详情页 dumpsys 加长等待")
+      url = resolve_url_via_dumpsys(
+        device, serial=serial, wait_s=profile.qa_resolve_url_wait,
+      )
+      if url:
+        _log_url(f"#{ref_idx} 详情页 dumpsys 命中: {url[:96]}")
+    elif page_now == Page.CHAT:
+      _log_url(f"#{ref_idx} 仍在 CHAT，等待详情打开后重试")
+      time.sleep(1.0)
+      page_now, _ = nav.current_page()
+      if page_now != Page.CHAT:
+        url = resolve_url_via_dumpsys(
+          device, serial=serial, wait_s=profile.qa_resolve_url_wait,
+        )
+      if not url and stream is not None:
+        url = poll_logcat_stream_for_url(
+          stream,
+          timeout_s=profile.qa_resolve_logcat_poll_timeout,
+          poll_interval_s=profile.qa_resolve_logcat_poll_interval,
+        )
+    if not url and page_now != Page.CHAT:
+      _log_url(f"#{ref_idx} 回落 dumpsys 重试（返回聊天后重点）")
+      nav.lite_back_to_chat()
+      _reanchor_ref_list_after_back(
+        device, profile, nav, tag=f"#{ref_idx} dumpsys前", quick=True,
+      )
+      time.sleep(0.2)
+      if stream is not None:
+        stream.mark()
+      if _ensure_citation_visible(device, citation, profile) and _click_citation(
+        device, citation, profile=profile,
+      ):
+        url = resolve_url_via_dumpsys(
+          device, serial=serial, wait_s=profile.qa_resolve_url_wait,
+        )
+
+  url = _apply_douyin_stitch_after_click(
+    url,
+    device=device,
+    nav=nav,
+    profile=profile,
+    serial=serial,
+    stream=stream,
+    citation=citation,
+    ref_idx=str(ref_idx),
+    method=method,
+  )
+
+  _log_url(f"#{ref_idx} 准备返回聊天页")
+  nav.lite_back_to_chat()
+  page, _ = nav.current_page()
+  if page != Page.CHAT:
+    _log_url(f"#{ref_idx} lite_back 未到聊天页({page.name})，safe_back")
+    nav.safe_back_to_chat(max_backs=profile.qa_resolve_url_max_backs)
+  _reanchor_ref_list_after_back(
+    device, profile, nav, tag=f"#{ref_idx} 解析后", quick=True,
+  )
+  time.sleep(profile.qa_resolve_url_post_back_sleep)
+
+  if url:
+    from app.modules.douyin_web_resolve import is_douyin_video_url, normalize_aweme_id
+
+    if is_douyin_video_url(url) or normalize_aweme_id(url):
+      pass
+    else:
+      url = _finalize_douyin_url(url, profile)
+    if recent_logcat_urls is not None and method in ("auto", "logcat"):
+      recent_logcat_urls.append(url)
+
+  return url
+
+
+def _resolve_thinking_reference_urls_simple(
+  device: Any,
+  citations: list[Citation],
+  *,
+  profile: GestureProfile,
+  serial: str | None,
+  max_refs: int,
+  method: ResolveMethod,
+) -> list[Citation]:
+  """60710 单遍主循环：可选抖音批量 → 逐条解析引用 N/M。"""
+  from app.modules.navigator import Page
+
+  nav = Navigator(device)
+  serial = serial or _device_serial(device)
+  page, _ = nav.current_page()
+  if page != Page.CHAT:
+    print("[问答] 当前不在聊天页，尝试返回豆包...")
+    nav.safe_back_to_chat(max_backs=profile.qa_resolve_url_max_backs)
+
+  limit = max_refs if max_refs > 0 else len(citations)
+  attempts = 0
+  click_method = method if method in ("auto", "logcat", "dumpsys") else "auto"
+  recent_logcat_urls: list[str] = []
+
+  stream = LogcatStream(serial=serial)
+  stream.start(settle_s=profile.qa_logcat_stream_settle)
+  resolved_by_index: dict[int, str] = {}
+  try:
+    if (
+      profile.qa_resolve_batch_douyin
+      and click_method in ("auto", "logcat")
+      and sum(1 for c in citations if not c.url) >= 2
+    ):
+      batch_ok = try_batch_resolve_douyin(
+        device, citations, nav=nav, profile=profile, stream=stream,
+      )
+      if not batch_ok:
+        print("[问答] 抖音批量未通过校验，回落逐条 logcat/dumpsys")
+    elif not profile.qa_resolve_batch_douyin and profile.qa_resolve_skip_douyin_per_click:
+      print("[问答] 抖音批量已关闭，仅解析网页类引用 URL（抖音条目保留无链接）")
+    elif not profile.qa_resolve_batch_douyin:
+      print("[问答] 抖音批量已关闭，抖音条目走点击→aweme_id 拼接验证（必要时点进 App）")
+
+    pending = _pending_sorted(citations)
+    for idx, citation in pending:
+      if max_refs > 0 and attempts >= limit:
+        break
+      if citation.url:
+        continue
+      print(
+        f"[问答] 解析引用 {attempts + 1}/{limit}: "
+        f"#{citation.ref_index or '?'} {citation.title[:36]!r}"
+      )
+      if should_skip_douyin_url_resolve(citation, profile):
+        print(
+          f"[问答] 跳过抖音引用 URL 逐条点击（保留条目）: "
+          f"#{citation.ref_index or '?'} {citation.title[:40]!r}"
+        )
+        continue
+      if not _ensure_citation_visible(device, citation, profile):
+        print(f"[问答] 引用不可见，跳过 URL: {citation.title[:40]!r}")
+        continue
+
+      url = _resolve_one_citation_url_simple(
+        device,
+        citation,
+        nav=nav,
+        profile=profile,
+        serial=serial,
+        method=click_method,
+        stream=stream,
+        recent_logcat_urls=recent_logcat_urls,
+      )
+      if url:
+        citation.url = url
+        resolved_by_index[idx] = url
+        print(
+          f"[问答] 引用 URL ({click_method}): "
+          f"{citation.ref_index or '?'} -> {url[:80]}"
+        )
+      else:
+        print(f"[问答] 未解析到 URL: {citation.title[:40]!r}")
+      attempts += 1
+  finally:
+    stream.stop()
+
+  out = list(citations)
+  for i, c in enumerate(out):
+    if i in resolved_by_index:
+      c.url = resolved_by_index[i]
+  return out
+
+
 def _resolve_one_citation_url(
   device: Any,
   citation: Citation,
@@ -1468,8 +2543,12 @@ def _resolve_one_citation_url(
   recent_logcat_urls: list[str] | None = None,
   brute_force: bool = False,
   expected_prompt: str = "",
+  sms_token: str = "",
+  sms_device_id: str = "",
 ) -> str:
   """单条引用：mark → 点击 → 从流/logcat 解析 → lite back。"""
+  from app.modules.douyin_handoff import try_resolve_douyin_after_click
+
   serial = serial or _device_serial(device)
   ref_idx = citation.ref_index or "?"
   channel = classify_citation_channel(citation)
@@ -1501,6 +2580,150 @@ def _resolve_one_citation_url(
 
   _log_page(nav, f"#{ref_idx} 点击后")
 
+  if not brute_force:
+    url = _try_fast_url_after_click(
+      device,
+      nav,
+      profile=profile,
+      serial=serial,
+      stream=stream,
+      method=method,
+      ref_idx=ref_idx,
+      channel=channel,
+    )
+    if (
+      not url
+      and channel == "douyin"
+      and method in ("auto", "logcat")
+      and not profile.qa_douyin_web_validate
+    ):
+      handoff_url, _ = try_resolve_douyin_after_click(
+        device,
+        nav,
+        profile,
+        serial=serial,
+        stream=stream,
+        sms_token=sms_token,
+        sms_device_id=sms_device_id,
+        batch_feed_swipes=0,
+      )
+      if handoff_url:
+        url = handoff_url
+        _log_url(f"#{ref_idx} 快速 Handoff/深链命中: {url[:96]}")
+    if (
+      url
+      and recent_logcat_urls is not None
+      and url in recent_logcat_urls[-3:]
+      and method in ("auto", "logcat")
+    ):
+      _log_url(f"#{ref_idx} 重复 URL 丢弃: {url[:80]}")
+      url = ""
+    if url:
+      url = _finalize_douyin_url(url, profile)
+      _return_after_fast_url_hit(
+        device, nav, profile, ref_idx=ref_idx, expected_prompt=expected_prompt,
+      )
+      if recent_logcat_urls is not None and method in ("auto", "logcat"):
+        recent_logcat_urls.append(url)
+      return url
+    _log_url(f"#{ref_idx} 快速路径未命中，留待笨办法")
+    _after_fast_miss(
+      device, nav, profile, ref_idx=ref_idx, expected_prompt=expected_prompt,
+    )
+    return ""
+
+  time.sleep(0.3)
+  from app.modules.navigator import Page
+
+  page_after_click, _ = nav.current_page()
+  if page_after_click == Page.WEB_DETAIL and method in ("auto", "logcat"):
+    url = ""
+    if stream is not None:
+      ids = extract_aweme_ids_ordered(stream.text_since_mark())
+      if ids:
+        url = _douyin_url_from_id(ids[0], profile)
+        if url:
+          _log_url(f"#{ref_idx} WebActivity logcat id={ids[0]} → {url[:96]}")
+    if not url:
+      url = resolve_url_via_dumpsys(device, serial=serial, wait_s=1.2)
+      if url:
+        _log_url(f"#{ref_idx} 点击后 WebActivity dumpsys: {url[:96]}")
+    if url:
+      url = _finalize_douyin_url(url, profile)
+      _ensure_chat_after_resolve(device, nav, profile, tag=f"#{ref_idx} web直出")
+      _reanchor_ref_list_after_back(device, profile, nav, tag=f"#{ref_idx} web直出")
+      if expected_prompt and not _chat_context_ok(
+        device, expected_prompt, profile, f"#{ref_idx} web直出后",
+      ):
+        _recover_chat_context(
+          device, nav, profile, expected_prompt, f"#{ref_idx} web直出",
+        )
+      return url
+
+  allow_app_jump = (
+    profile.qa_resolve_accept_app_jump and not profile.qa_douyin_web_validate
+  )
+
+  if channel == "douyin" and method in ("auto", "logcat") and not profile.qa_douyin_web_validate:
+    handoff_url, _ = try_resolve_douyin_after_click(
+      device,
+      nav,
+      profile,
+      serial=serial,
+      stream=stream,
+      sms_token=sms_token,
+      sms_device_id=sms_device_id,
+      batch_feed_swipes=0,
+    )
+    if handoff_url:
+      handoff_url = _finalize_douyin_url(handoff_url, profile)
+      _log_url(f"#{ref_idx} Handoff/深链命中: {handoff_url[:96]}")
+      nav.recover_from_external_douyin(gentle=True)
+      nav.lite_back_to_chat()
+      _reanchor_ref_list_after_back(device, profile, nav, tag=f"#{ref_idx} handoff后")
+      if expected_prompt and not _chat_context_ok(
+        device, expected_prompt, profile, f"#{ref_idx} handoff后",
+      ):
+        _reenter_target_chat(nav, expected_prompt, tag=f"#{ref_idx} handoff后")
+      return handoff_url
+
+  if (
+    channel == "douyin"
+    and profile.qa_douyin_web_validate
+    and method in ("auto", "logcat")
+    and stream is not None
+  ):
+    ids = extract_aweme_ids_ordered(stream.text_since_mark())
+    if ids:
+      url = _douyin_url_from_id(ids[0], profile)
+      if url:
+        _log_url(f"#{ref_idx} PC Web logcat id={ids[0]} → {url[:96]}")
+        _ensure_chat_after_resolve(device, nav, profile, tag=f"#{ref_idx} logcat id")
+        _reanchor_ref_list_after_back(device, profile, nav, tag=f"#{ref_idx} logcat id")
+        if expected_prompt and not _chat_context_ok(
+          device, expected_prompt, profile, f"#{ref_idx} logcat id",
+        ):
+          _recover_chat_context(
+            device, nav, profile, expected_prompt, f"#{ref_idx} logcat",
+          )
+        return url
+
+  time.sleep(0.1)
+  if channel == "douyin" and allow_app_jump and method in ("auto", "logcat"):
+    from app.modules.navigator import Page
+
+    page_now, _ = nav.current_page()
+    if page_now == Page.WEB_DETAIL:
+      url = resolve_url_via_dumpsys(device, serial=serial, wait_s=1.0)
+      if url:
+        _log_url(f"#{ref_idx} 豆包 WebActivity 同屏命中: {url[:96]}")
+        url = _finalize_douyin_url(url, profile)
+        _ensure_chat_after_resolve(device, nav, profile, tag=f"#{ref_idx} web后")
+        _reanchor_ref_list_after_back(device, profile, nav, tag=f"#{ref_idx} web后")
+        return url
+    nav.wait_and_accept_app_jump(timeout=6.0)
+    nav.wait_for_aweme_foreground(timeout=8.0)
+
   if stream is not None and method in ("auto", "logcat"):
     url = poll_logcat_stream_for_url(
       stream,
@@ -1514,6 +2737,31 @@ def _resolve_one_citation_url(
       method=method if method != "net" else "auto",
       profile=profile,
     )
+
+  if (
+    not url
+    and channel == "douyin"
+    and allow_app_jump
+    and method in ("auto", "logcat")
+  ):
+    if nav.accept_app_jump_prompt():
+      time.sleep(0.8)
+    if stream is not None:
+      url = poll_logcat_stream_for_url(
+        stream,
+        timeout_s=logcat_timeout * 2,
+        poll_interval_s=profile.qa_resolve_logcat_poll_interval,
+      )
+    if not url:
+      log_text = (
+        stream.text_since_mark()
+        if stream is not None
+        else dump_logcat_tail(serial=serial, count=120)
+      )
+      aweme_ids = extract_aweme_ids_ordered(log_text)
+      if aweme_ids:
+        url = _douyin_url_from_id(aweme_ids[0], profile)
+        _log_url(f"#{ref_idx} 打开抖音后 aweme id 重建 URL")
 
   if url:
     _log_url(f"#{ref_idx} logcat 命中 URL: {url[:96]}")
@@ -1609,21 +2857,12 @@ def _resolve_one_citation_url(
     elif not url and page_now == Page.CHAT:
       _log_url(f"#{ref_idx} CHAT 重试后仍未解析到 URL")
 
-  _log_url(f"#{ref_idx} 准备返回聊天页")
-  nav.lite_back_to_chat()
-  from app.modules.navigator import Page
+  if url:
+    url = _finalize_douyin_url(url, profile)
 
-  page, _ = nav.current_page()
-  if page != Page.CHAT:
-    _log_url(f"#{ref_idx} lite_back 未到聊天页({page.name})，safe_back")
-    nav.safe_back_to_chat(max_backs=profile.qa_resolve_url_max_backs)
-  _reanchor_ref_list_after_back(device, profile, nav, tag=f"#{ref_idx} 解析后")
-  time.sleep(profile.qa_resolve_url_post_back_sleep)
-
-  if expected_prompt and not _chat_context_ok(
-    device, expected_prompt, profile, f"#{ref_idx} 返回后",
-  ):
-    return ""
+  _back_to_chat_after_resolve(
+    device, nav, profile, ref_idx=ref_idx, expected_prompt=expected_prompt,
+  )
 
   if url and recent_logcat_urls is not None and method in ("auto", "logcat"):
     recent_logcat_urls.append(url)
@@ -1663,18 +2902,58 @@ def _resolve_pending_pass(
   attempts_so_far: int = 0,
   resolved_by_index: dict[int, str],
   expected_prompt: str = "",
+  sms_token: str = "",
+  sms_device_id: str = "",
+  phase_deadline: float | None = None,
+  recover_state: list[int] | None = None,
 ) -> int:
   """按 pass 解析 pending 子集；返回累计 attempts。"""
   limit = max_refs if max_refs > 0 else len(citations)
   attempts = attempts_so_far
+  recover_max = profile.qa_resolve_recover_max_per_task
+  recover_used = recover_state if recover_state is not None else [0]
+
+  def _phase_timed_out() -> bool:
+    if phase_deadline is None:
+      return False
+    if time.time() >= phase_deadline:
+      budget = profile.qa_resolve_url_phase_budget_sec
+      print(
+        f"[问答] {pass_label} 中止：URL 阶段超时"
+        f"（预算 {budget:.0f}s），返回已解析 partial"
+      )
+      return True
+    return False
+
   for idx, citation in pending:
+    if _phase_timed_out():
+      break
     if max_refs > 0 and attempts >= limit:
       break
     if citation.url:
       continue
     if not _chat_context_ok(device, expected_prompt, profile, pass_label):
-      print(f"[问答] {pass_label} 中止：已离开目标会话")
-      break
+      if recover_max > 0 and recover_used[0] >= recover_max:
+        print(
+          f"[问答] {pass_label} 中止：会话恢复次数达上限"
+          f"（{recover_max}）"
+        )
+        break
+      recover_used[0] += 1
+      if not _recover_chat_context(
+        device,
+        nav,
+        profile,
+        expected_prompt,
+        pass_label,
+      ):
+        print(f"[问答] {pass_label} 中止：已离开目标会话")
+        break
+      if not _chat_context_ok(
+        device, expected_prompt, profile, f"{pass_label} 恢复后",
+      ):
+        print(f"[问答] {pass_label} 中止：已离开目标会话")
+        break
 
     channel = classify_citation_channel(citation)
     if channels is not None and channel not in channels:
@@ -1710,13 +2989,9 @@ def _resolve_pending_pass(
       recent_logcat_urls=recent_logcat_urls,
       brute_force=brute_force,
       expected_prompt=expected_prompt,
+      sms_token=sms_token,
+      sms_device_id=sms_device_id,
     )
-
-    if expected_prompt and not _chat_context_ok(
-      device, expected_prompt, profile, f"{pass_label} #{citation.ref_index or '?'}"
-    ):
-      print(f"[问答] {pass_label} 中止：点击返回后会话错位")
-      break
 
     if url:
       citation.url = url
@@ -1725,11 +3000,43 @@ def _resolve_pending_pass(
         f"[问答] {pass_label} URL: "
         f"{citation.ref_index or '?'} -> {url[:80]}"
       )
+      if profile.qa_url_reachability_check and (
+        brute_force or not profile.qa_url_reachability_brute_only
+      ):
+        from app.modules.qa_url_reachability import (
+          apply_url_reachability,
+          citation_reachability_line,
+        )
+
+        apply_url_reachability(
+          citation, timeout=profile.qa_url_reachability_timeout,
+        )
+        print(f"[URL可达] {pass_label} {citation_reachability_line(citation)}")
     else:
       print(
         f"[问答] {pass_label} 未解析到 URL: "
         f"#{citation.ref_index or '?'} {citation.title[:40]!r}"
       )
+
+    if expected_prompt and not _chat_context_ok(
+      device, expected_prompt, profile, f"{pass_label} #{citation.ref_index or '?'}"
+    ):
+      if recover_max > 0 and recover_used[0] >= recover_max:
+        print(
+          f"[问答] {pass_label} 中止：会话恢复次数达上限"
+          f"（{recover_max}）"
+        )
+        break
+      recover_used[0] += 1
+      if not _recover_chat_context(
+        device,
+        nav,
+        profile,
+        expected_prompt,
+        f"{pass_label} #{citation.ref_index or '?'}",
+      ):
+        print(f"[问答] {pass_label} 中止：无法恢复目标会话")
+        break
 
     attempts += 1
   return attempts
@@ -1744,14 +3051,33 @@ def resolve_thinking_reference_urls(
   max_refs: int = 0,
   method: ResolveMethod = "logcat",
   expected_prompt: str = "",
+  expected_answer: str = "",
+  sms_token: str = "",
+  sms_device_id: str = "",
 ) -> list[Citation]:
   """
   逐条点击思考引用，解析真实 HTTP 链接写回 Citation.url。
 
-  分三阶段：抖音批量 → 技术逐条（web/douyin 渠道）→ 笨办法补齐剩余。
+  分三阶段：抖音批量 → 快速逐条（logcat/短 dumpsys）→ 笨办法补齐剩余无 URL。
   method: logcat（默认）、auto（logcat→dumpsys）、dumpsys；net 见 qa_reference_net。
+  expected_answer：目标会话回答正文片段，用于错位后精准重进会话。
   """
+  set_expected_answer_snippet(expected_answer)
+  reset_url_resolve_log_state()
   p = profile or GestureProfile()
+  _apply_session_guard_env(p)
+
+  if getattr(p, "qa_resolve_simple_mode", False):
+    serial = serial or _device_serial(device)
+    return _resolve_thinking_reference_urls_simple(
+      device,
+      citations,
+      profile=p,
+      serial=serial,
+      max_refs=max_refs,
+      method=method,
+    )
+
   nav = Navigator(device)
   serial = serial or _device_serial(device)
   if not citations:
@@ -1771,13 +3097,49 @@ def resolve_thinking_reference_urls(
   attempts = 0
   click_method = method if method in ("auto", "logcat", "dumpsys") else "auto"
   recent_logcat_urls: list[str] = []
+  phase_budget = p.qa_resolve_url_phase_budget_sec
+  phase_deadline = (
+    time.time() + phase_budget if phase_budget > 0 else None
+  )
+  recover_state = [0]
+
+  def _phase_timed_out(tag: str = "") -> bool:
+    if phase_deadline is None:
+      return False
+    if time.time() >= phase_deadline:
+      suffix = f"（{tag}）" if tag else ""
+      print(
+        f"[问答] URL 阶段超时{suffix}（预算 {phase_budget:.0f}s），"
+        "返回已解析 partial"
+      )
+      return True
+    return False
 
   stream = LogcatStream(serial=serial)
   stream.start(settle_s=p.qa_logcat_stream_settle)
   resolved_by_index: dict[int, str] = {}
   try:
+    need_douyin_login = (
+      p.qa_douyin_ensure_login_before_batch
+      and not p.qa_douyin_web_validate
+      and click_method in ("auto", "logcat")
+    )
+    if need_douyin_login:
+      from app.modules.douyin_sms_login import ensure_douyin_logged_in
+
+      ensure_douyin_logged_in(
+        device, nav, token=sms_token, device_id=sms_device_id,
+      )
+    elif p.qa_douyin_web_validate and click_method in ("auto", "logcat"):
+      print("[问答] PC Web 验证已开启，跳过批次前抖音 SMS 登录")
+    if nav.is_aweme_foreground() or nav.is_app_jump_prompt():
+      print("[问答] URL 解析前仍在外部 App，尝试温和回豆包...")
+      nav.recover_from_external_douyin(gentle=True)
+      if expected_prompt:
+        nav.reenter_chat_by_prompt(expected_prompt)
+      time.sleep(p.qa_resolve_url_post_back_sleep)
     pending_before = _pending_sorted(citations)
-    if (
+    use_batch = (
       p.qa_resolve_batch_douyin
       and click_method in ("auto", "logcat")
       and len(pending_before) >= 2
@@ -1785,34 +3147,44 @@ def resolve_thinking_reference_urls(
         classify_citation_channel(c) == "douyin"
         for _, c in pending_before
       )
-    ):
-      batch_douyin_ok = try_batch_resolve_douyin(
-        device,
-        citations,
-        nav=nav,
-        profile=p,
-        stream=stream,
-      )
-      if not batch_douyin_ok:
-        print("[问答] 抖音批量未通过校验，回落技术逐条 + 笨办法补齐")
+    )
+    if use_batch:
+      if p.qa_douyin_web_validate:
+        print("[问答] PC Web 模式：batch 收 aweme id，回填时 PC 多格式验证")
+      if not _phase_timed_out("批量前"):
+        batch_douyin_ok = try_batch_resolve_douyin(
+          device,
+          citations,
+          nav=nav,
+          profile=p,
+          stream=stream,
+          expected_prompt=expected_prompt,
+          sms_token=sms_token,
+          sms_device_id=sms_device_id,
+        )
+        if not batch_douyin_ok:
+          print("[问答] 抖音批量未通过校验，回落快速逐条 + 笨办法补齐")
     elif not p.qa_resolve_batch_douyin:
-      print("[问答] 抖音批量已关闭，抖音条目走技术逐条/笨办法逐条点击")
+      print("[问答] 抖音批量已关闭，抖音条目走快速逐条/笨办法逐条点击")
+
+    if _phase_timed_out("快速逐条前"):
+      return citations
 
     pending = _pending_sorted(citations)
-    tech_pending = [
-      (i, c)
-      for i, c in pending
-      if classify_citation_channel(c) in ("web", "douyin")
-    ]
+    resolved_before = len(citations) - len(pending)
+    tech_pending = list(pending)
     tech_pending.sort(
       key=lambda x: (
-        _CHANNEL_RESOLVE_ORDER[classify_citation_channel(x[1])],
         x[1].ref_index or 9999,
         x[1].bounds[1] if x[1].bounds else 0,
       ),
     )
     if tech_pending:
-      print(f"[问答] 技术逐条解析 {len(tech_pending)} 条（web/douyin 渠道）")
+      print(
+        f"[问答] 快速逐条 {len(tech_pending)} 条"
+        f"（已有 URL {resolved_before}/{len(citations)}，"
+        "logcat/短 dumpsys，失败留笨办法）"
+      )
       attempts = _resolve_pending_pass(
         device,
         citations,
@@ -1823,19 +3195,39 @@ def resolve_thinking_reference_urls(
         click_method=click_method,
         stream=stream,
         recent_logcat_urls=recent_logcat_urls,
-        pass_label="技术逐条",
-        channels={"web", "douyin"},
+        pass_label="快速",
+        channels=None,
         brute_force=False,
-        apply_skip_policy=True,
+        apply_skip_policy=False,
         max_refs=limit,
-        attempts_so_far=attempts,
+        attempts_so_far=0,
         resolved_by_index=resolved_by_index,
         expected_prompt=expected_prompt,
+        sms_token=sms_token,
+        sms_device_id=sms_device_id,
+        phase_deadline=phase_deadline,
+        recover_state=recover_state,
       )
+
+    if _phase_timed_out("笨办法前"):
+      return citations
+
+    if getattr(p, "qa_resolve_skip_brute_pass", False):
+      pending = _pending_sorted(citations)
+      if pending:
+        print(
+          f"[问答] 跳过笨办法补齐 {len(pending)} 条"
+          "（qa_resolve_skip_brute_pass / QA_URL_SKIP_BRUTE）"
+        )
+      return citations
 
     pending = _pending_sorted(citations)
     if pending:
-      print(f"[问答] 笨办法补齐 {len(pending)} 条剩余无 URL 引用")
+      resolved_fast = len(citations) - len(pending)
+      print(
+        f"[问答] 笨办法补齐 {len(pending)} 条"
+        f"（快速已得 {resolved_fast}/{len(citations)}）"
+      )
       _resolve_pending_pass(
         device,
         citations,
@@ -1850,10 +3242,14 @@ def resolve_thinking_reference_urls(
         channels=None,
         brute_force=True,
         apply_skip_policy=False,
-        max_refs=limit,
-        attempts_so_far=attempts,
+        max_refs=0,
+        attempts_so_far=0,
         resolved_by_index=resolved_by_index,
         expected_prompt=expected_prompt,
+        sms_token=sms_token,
+        sms_device_id=sms_device_id,
+        phase_deadline=phase_deadline,
+        recover_state=recover_state,
       )
   finally:
     stream.stop()
@@ -1862,4 +3258,13 @@ def resolve_thinking_reference_urls(
   for i, c in enumerate(out):
     if i in resolved_by_index:
       c.url = resolved_by_index[i]
+
+  from app.modules.qa_url_reachability import summarize_unreachable
+
+  checked, bad = summarize_unreachable(out)
+  if checked:
+    print(
+      f"[URL可达] 汇总: 已探测 {checked} 条，不可达 {bad} 条"
+      "（404/5xx 等为豆包或站点问题，非采集系统错误）"
+    )
   return out

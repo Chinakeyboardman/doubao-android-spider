@@ -31,3 +31,4 @@ alwaysApply: true
 - UI 细节与选择器：仍遵循 **`doubao-spider.mdc`**。
 - 格式与类型：遵循 **`code-style.mdc`**。
 - 架构与领域边界：遵循 **`architecture-patterns.mdc`**、**`ddd-domain.mdc`**。
+- **新机型 / 真机适配**（沙箱 S01–S07、diagnose、抖音链接、双机抽检）：先读 **`.cursor/skills/device-adaptation/SKILL.md`**，细节见同目录 `reference.md` / `examples.md`。

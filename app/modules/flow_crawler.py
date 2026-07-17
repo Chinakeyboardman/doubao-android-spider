@@ -4,7 +4,9 @@
 
 端到端步骤（与 `run()` 一致）：
   1. 启动应用；若落在 Applet/Web/分享层，则 back 回聊天。
-  2. 登录：`handle_login_if_needed` — 已登录则跳过；否则人工等待或 `login_via_api`。
+  2. 登录：`handle_login_if_needed` — 已登录（非游客聊天页）则秒回；游客态点
+     「立即登录」横幅进登录页，走 SMS 自动登录（失败杀后台换号重试）；未配 token
+     则等待人工登录。游客态每机约 10~20 条限额，批量采集前必须登录。
   3. 发送提示词 → `wait_reply_done`（停止按钮消失 + 正文稳定）。
   4. 回到底部 → `copy_reply`（优先点 `msg_action_copy`，否则取长文本候选）。
   5. 嵌入式商品卡片：`_scroll_to_reply_top` 后向下轻扫，用「可见性边沿」状态机
@@ -34,12 +36,13 @@ from typing import Any, Optional
 from app.config.gesture_profile import GestureProfile
 from app.modules.navigator import Navigator, Page
 from app.modules.web_detail_capture import capture_web_detail_screenshots
-from app.modules.sms_login import auto_login
+from app.modules.sms_login import auto_login, enter_verification_code
 from app.modules.chat_ui_heuristics import (
     collect_reply_text_candidates,
     content_bottom_y,
     content_top_y,
     display_wh,
+    send_chat_message,
     try_click_copy_button,
 )
 
@@ -95,6 +98,64 @@ class FlowCrawler:
             pass
         time.sleep(2.0)
 
+    def _dismiss_blocking_dialogs(self) -> bool:
+        """关闭首次启动隐私弹窗等阻塞层（vivo 等新设备常见）。"""
+        dismissed = False
+        try:
+            title = self.d.xpath(
+                '//*[@resource-id="com.larus.nova:id/dialog_title"]'
+            ).get(timeout=0.4)
+            if title and "欢迎" in (title.info.get("text") or ""):
+                print("  [启动] 检测到欢迎使用弹窗")
+        except Exception:
+            title = None
+        for sel in (
+            '//*[@resource-id="com.larus.nova:id/confirm" and @text="同意"]',
+            '//*[@resource-id="com.larus.nova:id/confirm"]',
+        ):
+            try:
+                btn = self.d.xpath(sel).get(timeout=0.5)
+                if btn:
+                    btn.click()
+                    print("  [启动] 已点击隐私弹窗「同意」")
+                    time.sleep(1.2)
+                    dismissed = True
+                    break
+            except Exception:
+                continue
+        for sel in (
+            '//*[@resource-id="com.larus.nova:id/tvDialogCancel" and @text="忽略"]',
+            '//*[@resource-id="com.larus.nova:id/tvDialogCancel"]',
+        ):
+            try:
+                btn = self.d.xpath(sel).get(timeout=0.5)
+                if btn:
+                    btn.click()
+                    print("  [启动] 已关闭版本更新弹窗「忽略」")
+                    time.sleep(0.8)
+                    dismissed = True
+                    break
+            except Exception:
+                continue
+        try:
+            if self.nav.dismiss_push_reminder_dialog():
+                dismissed = True
+        except Exception:
+            pass
+        try:
+            if self.nav.accept_blocking_prompts(max_rounds=2):
+                dismissed = True
+        except Exception:
+            pass
+        return dismissed
+
+    def _grant_runtime_permissions(self) -> bool:
+        """Android 运行时权限弹窗（vivo 新机常见）。"""
+        try:
+            return self.nav.accept_blocking_prompts(max_rounds=3)
+        except Exception:
+            return False
+
     def start_app(self, max_wait: int = 20) -> bool:
         print("[启动] 打开豆包...")
         try:
@@ -102,6 +163,9 @@ class FlowCrawler:
         except Exception:
             cur = {}
         pkg = str(cur.get("package", ""))
+        act = str(cur.get("activity", ""))
+        if "permissioncontroller" in pkg or "grantpermissions" in act.lower():
+            self._grant_runtime_permissions()
         if self.PACKAGE not in pkg:
             if "aweme" in pkg or "ss.android" in pkg:
                 self._recover_external_app()
@@ -117,42 +181,53 @@ class FlowCrawler:
                 else:
                     self.nav.safe_back_to_chat(max_backs=8)
                     if not self.nav.is_chat():
-                        self.d.app_start(self.PACKAGE)
-                        time.sleep(2.0)
+                        self.nav.hard_restart_app(reason="启动前未回聊天页")
 
         web_stuck = 0
+        stuck_threshold = max(1, int(self.p.fc_app_hard_restart_stuck))
         for i in range(max_wait):
             time.sleep(1)
             p, cur = self.nav.current_page()
             act = cur.get("activity", "")
             print(f"  [{i+1}s] {act} -> {p.name}")
+            self._grant_runtime_permissions()
+            self._dismiss_blocking_dialogs()
             if p in (Page.CHAT, Page.LOGIN):
+                self._dismiss_blocking_dialogs()
                 return True
             if p == Page.HOME:
+                self._dismiss_blocking_dialogs()
                 print("  [启动] 已在豆包首页壳，视为就绪")
                 return True
             if p == Page.OTHER_APP:
                 web_stuck = 0
+                act_l = act.lower()
+                if "grantpermissions" in act_l or "permission" in act_l or "permissioncontroller" in pkg.lower():
+                    self._grant_runtime_permissions()
+                    continue
                 self._recover_external_app()
                 continue
             if p in (Page.APPLET_LIST, Page.WEB_DETAIL, Page.SHARE_OVERLAY, Page.UNKNOWN):
                 self.nav.safe_back_to_chat(max_backs=4)
                 if self.nav.is_chat():
                     return True
-                if p == Page.WEB_DETAIL:
+                p_after, _ = self.nav.current_page()
+                if p_after in (Page.WEB_DETAIL, Page.APPLET_LIST, Page.UNKNOWN):
                     web_stuck += 1
-                    if web_stuck >= 3:
-                        print("  [启动] WebActivity 仍卡住，重启豆包")
-                        self.d.app_start(self.PACKAGE)
-                        time.sleep(2.0)
+                    if web_stuck >= stuck_threshold:
+                        print(
+                            f"  [启动] {p_after.name} 仍卡住"
+                            f"（{web_stuck}/{stuck_threshold}），强杀重启"
+                        )
+                        self.nav.hard_restart_app(reason=f"{p_after.name}卡住")
                         web_stuck = 0
                 continue
         return False
 
     def login_via_api(self, phone: str, code: str) -> bool:
-        """通过测试手机号+验证码自动登录（预留 API 接口）。"""
+        """通过预设手机号+验证码登录（手动调试用）。"""
         if not self.nav.is_login():
-            return True
+            return not self.nav.is_guest_chat()
         try:
             btn = self.d.xpath('//*[@resource-id="com.larus.nova:id/button_login" and contains(@text,"手机号")]').get(timeout=3)
             if btn:
@@ -176,13 +251,67 @@ class FlowCrawler:
         try:
             code_el = self.d.xpath('//*[@resource-id="com.larus.nova:id/edit_solid"]').get(timeout=3)
             if code_el:
-                code_el.click()
-                time.sleep(0.3)
-                self.d.send_keys(code)
-                time.sleep(3)
+                enter_verification_code(self.d, code, nav=self.nav)
         except Exception:
             pass
-        return self.nav.wait_for_page(Page.CHAT, timeout=15)
+        return self.nav.wait_for_page(Page.CHAT, timeout=15) and not self.nav.is_guest_chat()
+
+    def _click_guest_login_banner(self) -> bool:
+        """游客 Chat 页点「立即登录」引导横幅。"""
+        try:
+            banner = self.d.xpath(
+                '//*[@resource-id="com.larus.nova:id/tv_login_guide_banner"]'
+            ).get(timeout=0.5)
+            if banner:
+                print("  [登录] 点击游客登录引导横幅")
+                banner.click()
+                time.sleep(1.5)
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _reset_stale_login(self) -> bool:
+        """验证码/手机号页残留时杀后台，避免一直绑旧号码。"""
+        _, cur = self.nav.current_page()
+        act = cur.get("activity", "")
+        if not any(
+            k in act
+            for k in ("VerificationCodeActivity", "PhoneLoginActivity")
+        ):
+            return False
+        print("[登录] 检测到残留登录页（旧手机号），杀后台重来")
+        self.nav.hard_restart_app(reason="清除残留登录状态")
+        self._dismiss_blocking_dialogs()
+        time.sleep(1.0)
+        return True
+
+    def _is_logged_in_chat(self) -> bool:
+        """已登录且在聊天页（非游客态）。
+
+        单次 current_page + 单次横幅探测，避免批量采集时每条重复多次 uidump。
+        """
+        p, _ = self.nav.current_page()
+        if p != Page.CHAT:
+            return False
+        try:
+            banner = self.d.xpath(
+                '//*[@resource-id="com.larus.nova:id/tv_login_guide_banner"]'
+            ).get(timeout=0.4)
+            return banner is None
+        except Exception:
+            return True
+
+    def _goto_login_page(self) -> bool:
+        """确保到达登录页：先清残留态，再处理游客横幅。"""
+        self._reset_stale_login()
+        if self.nav.is_login():
+            return True
+        if self.nav.is_guest_chat():
+            self._click_guest_login_banner()
+            if self.nav.wait_for_page(Page.LOGIN, timeout=12):
+                return True
+        return self.nav.is_login()
 
     def handle_login_if_needed(
         self,
@@ -190,31 +319,69 @@ class FlowCrawler:
         code: str = "",
         sms_token: str = "",
         device_id: str = "",
+        max_attempts: int = 3,
     ) -> bool:
-        if not self.nav.is_login():
+        """确保进入非游客聊天页。
+
+        游客态每机约 10~20 条限额，批量采集前必须登录。SMS 登录失败会杀后台
+        换号重试（旧手机号残留在验证码页，不杀后台会一直复用旧号）。
+        """
+        # 快速路径：批量采集时绝大多数调用已登录，先用最轻的检查放行
+        if self._is_logged_in_chat():
             return True
-        # 优先：已提供手机号+验证码（手动调试用）
+
+        # 需要介入：清阻塞弹窗 + 残留登录页后再判定
+        self._dismiss_blocking_dialogs()
+        self._reset_stale_login()
+
+        if self._is_logged_in_chat():
+            return True
+
+        # 非游客、非登录页（如首页壳）→ 视为已登录
+        if not self.nav.is_login() and not self.nav.is_guest_chat():
+            return True
+
+        # 手动调试：预设手机号+验证码
         if phone and code:
             print(f"[登录] 使用预设手机号+验证码登录: phone={phone[:3]}***")
+            if not self._goto_login_page():
+                return self._is_logged_in_chat()
             return self.login_via_api(phone, code)
-        # 自动：通过 SMS API 获取手机号和验证码
+
         token = sms_token or os.environ.get("SMS_API_TOKEN", "")
-        if token:
-            print("[登录] 检测到登录页，使用 SMS API 自动登录...")
-            dev_id = device_id or os.environ.get("SMS_DEVICE_ID", "doubao_spider")
-            return auto_login(self.d, self.nav, token=token, device_id=dev_id)
-        # 兜底：等待人工登录
-        print("[登录] 检测到登录页，未配置 SMS_API_TOKEN，请在手机上手动完成登录...")
-        for i in range(120):
-            time.sleep(2)
-            if self.nav.is_chat():
-                print(f"[登录] 登录成功（等待 {i*2}s）")
-                return True
-            if not self.nav.is_login():
-                time.sleep(3)
-                if self.nav.is_chat():
+        if not token:
+            return self._wait_manual_login()
+
+        dev_id = device_id or os.environ.get("SMS_DEVICE_ID", "doubao_spider")
+        for attempt in range(1, max_attempts + 1):
+            if not self._goto_login_page():
+                if self._is_logged_in_chat():
                     return True
-        print("[登录] 等待超时")
+                print(f"[登录] 第 {attempt}/{max_attempts} 次未能到达登录页")
+                return False
+            print(f"[登录] SMS 自动登录 尝试 {attempt}/{max_attempts}")
+            if auto_login(self.d, self.nav, token=token, device_id=dev_id):
+                if self._is_logged_in_chat():
+                    print("[登录] 登录成功，已退出游客态")
+                    return True
+            if attempt < max_attempts:
+                print("[登录] 本次失败，杀后台换号重试")
+                self.nav.hard_restart_app(reason="登录重试换号")
+                self._dismiss_blocking_dialogs()
+                time.sleep(1.0)
+        print(f"[登录] 已达最大重试次数（{max_attempts}），登录失败")
+        return False
+
+    def _wait_manual_login(self, timeout_s: int = 240) -> bool:
+        """未配置 SMS_API_TOKEN 时，等待人工在手机上完成登录。"""
+        print("[登录] 未配置 SMS_API_TOKEN，请在手机上手动完成登录...")
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            time.sleep(2)
+            if self._is_logged_in_chat():
+                print("[登录] 检测到已登录")
+                return True
+        print("[登录] 等待人工登录超时")
         return False
 
     # ==================== 聊天 ====================
@@ -232,40 +399,19 @@ class FlowCrawler:
             self.nav.safe_back_to_chat(max_backs=8)
             if self.nav.is_chat():
                 return True
-            print("  [导航] 仍未回聊天页，重启豆包")
-            self.d.app_start(self.PACKAGE)
-            time.sleep(2.0)
+            print("  [导航] 仍未回聊天页，强杀重启豆包")
+            self.nav.hard_restart_app(reason="采集后未回聊天页")
             return self.nav.is_chat()
         return self.nav.safe_back_to_chat(max_backs=8)
 
     def send_message(self, text: str) -> bool:
         if not self._ensure_chat():
             return False
-        for sel in ['//*[@resource-id="com.larus.nova:id/input_text"]', '//*[contains(@class,"EditText")]']:
-            try:
-                el = self.d.xpath(sel).get(timeout=2)
-                if el:
-                    el.click()
-                    time.sleep(0.3)
-                    self.d.send_keys(text)
-                    time.sleep(0.3)
-                    break
-            except Exception:
-                continue
-        else:
-            print("[发送] 未找到输入框")
-            return False
-        for sel in ['//*[@resource-id="com.larus.nova:id/action_send"]', '//*[@contentDescription="发送"]']:
-            try:
-                btn = self.d.xpath(sel).get(timeout=1.5)
-                if btn:
-                    btn.click()
-                    print(f"[发送] 已发送: {text[:40]}")
-                    return True
-            except Exception:
-                continue
-        print("[发送] 未找到发送按钮")
-        return False
+        try:
+            self.nav.accept_blocking_prompts(max_rounds=2)
+        except Exception:
+            pass
+        return send_chat_message(self.d, text, profile=self.p)
 
     def wait_reply_done(self, timeout: int = 120) -> bool:
         """生成中会出现「停止」类控件；消失后正文连续若干次不变即认为完成。"""

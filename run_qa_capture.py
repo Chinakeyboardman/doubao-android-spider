@@ -30,6 +30,10 @@ from app.utils.utils import log_error, log_info
 
 
 def main() -> int:
+  from app.utils.utils import install_op_logging, set_op_log_device
+
+  install_op_logging()
+
   parser = argparse.ArgumentParser(description="豆包问答完整采集")
   parser.add_argument(
     "--prompt",
@@ -93,6 +97,8 @@ def main() -> int:
     help="质量未达标时返回非 0（正文/引用/URL/截图不全）",
   )
   args = parser.parse_args()
+
+  set_op_log_device(args.serial)
 
   mode = "fast" if args.no_deep_think else args.mode
 

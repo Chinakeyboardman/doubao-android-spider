@@ -10,6 +10,8 @@ from app.config.gesture_profile import GestureProfile
 from app.modules.detail_strip_stitch import (
   crop_fullscreen_to_detail_content,
   stitch_content_strips_vertical,
+  stitch_content_strips_vertical_v2,
+  stitch_qa_shot_segments,
 )
 
 
@@ -78,3 +80,33 @@ def test_replay_golden_full_png_height() -> None:
   full_crop = crop_fullscreen_to_detail_content(str(full), profile)
   shot_crop = crop_fullscreen_to_detail_content(str(shot), profile)
   assert full_crop.height > shot_crop.height * 1.8
+
+
+def test_session_130041_v2_stitch_collapses_near_duplicate_frames() -> None:
+  """130041：v2 应显著短于旧拼接，且多数帧对为 near_duplicate。"""
+  session = (
+    ROOT
+    / "var"
+    / "vivo-x-fold6"
+    / "spot_check"
+    / "20260714"
+    / "qa_capture"
+    / "2026-07-16"
+    / "130041"
+  )
+  if not session.is_dir():
+    return
+
+  profile = _qa_profile()
+  shot_paths = sorted(session.glob("shot_*.png"))
+  shot_paths = [p for p in shot_paths if not p.name.startswith("shot_think")]
+  if len(shot_paths) < 2:
+    return
+
+  crops = [crop_fullscreen_to_detail_content(str(p), profile) for p in shot_paths]
+  legacy, _ = stitch_content_strips_vertical_v2(crops, use_v2_overlap=False)
+  v2_img, diagnoses = stitch_content_strips_vertical_v2(crops, use_v2_overlap=True)
+
+  assert v2_img.height < legacy.height * 0.55
+  near_dup = sum(1 for d in diagnoses if d.diagnosis == "near_duplicate")
+  assert near_dup >= len(diagnoses) // 2

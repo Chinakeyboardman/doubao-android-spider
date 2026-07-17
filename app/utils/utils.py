@@ -1,10 +1,37 @@
 import os
+import re
 import time
 import logging
+import builtins
 from datetime import datetime
-from typing import Callable
+from typing import Callable, TextIO
 
-# 配置日志
+_OP_TS_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]")
+_SN_TAG_RE = re.compile(r"\[SN=[^\]]+\]")
+_OP_LOG_INSTALLED = False
+_OP_DEVICE_SN = ""
+_orig_print = builtins.print
+
+
+def device_log_tag() -> str:
+    """当前进程绑定的 adb 序列号标签，如 `` [SN=10ADBY1Z7C0042Z]``。"""
+    if not _OP_DEVICE_SN:
+        return ""
+    return f" [SN={_OP_DEVICE_SN}]"
+
+
+def set_op_log_device(serial: str | None) -> None:
+    """绑定本 worker 的 adb SN，后续 print / logging 均带 ``[SN=...]``。"""
+    global _OP_DEVICE_SN
+    _OP_DEVICE_SN = (serial or "").strip()
+
+
+def reset_op_log_device() -> None:
+    """测试用：清除 SN 绑定。"""
+    global _OP_DEVICE_SN
+    _OP_DEVICE_SN = ""
+
+# 配置日志（入口脚本可调用 install_op_logging 统一格式）
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -94,26 +121,99 @@ def get_current_time():
     """
     return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
 
+
 def format_message(message):
     """
-    格式化消息
+    格式化消息：时间戳 + 可选 ``[SN=...]`` + 正文。
     """
-    return f"[{get_current_time()}] {message}"
+    if not isinstance(message, str):
+        message = str(message)
+    if _SN_TAG_RE.search(message) and _OP_TS_RE.match(message):
+        return message
+    tag = device_log_tag()
+    if _OP_TS_RE.match(message):
+        if not tag or _SN_TAG_RE.search(message):
+            return message
+        m = _OP_TS_RE.match(message)
+        return f"{m.group(0)}{tag}{message[m.end():]}"
+    prefix = f"[{get_current_time()}]"
+    return f"{prefix}{tag} {message}" if tag else f"{prefix} {message}"
+
+
+def _format_first_print_arg(first: str) -> str:
+    if _SN_TAG_RE.search(first) and _OP_TS_RE.match(first):
+        return first
+    if _OP_TS_RE.match(first):
+        return format_message(first)
+    return format_message(first)
+
+
+def op_print(*args, file: TextIO | None = None, **kwargs) -> None:
+    """带时间戳的操作日志输出（与 install_op_logging 的 print 钩子格式一致）。"""
+    global _orig_print
+    if args:
+        first = args[0]
+        if isinstance(first, str):
+            args = (_format_first_print_arg(first),) + args[1:]
+    _orig_print(*args, file=file, **kwargs)
+
+
+def install_op_logging() -> None:
+    """
+    为真机操作日志统一加时间戳：劫持 builtins.print，并统一 root logger 格式。
+
+    在 run_qa_spot_check / run_qa_capture 等入口 main() 开头调用一次即可。
+    """
+    global _OP_LOG_INSTALLED, _orig_print
+    if _OP_LOG_INSTALLED:
+        return
+    _OP_LOG_INSTALLED = True
+
+    _orig_print = builtins.print
+
+    def _ts_print(*args, **kwargs):
+        if args:
+            first = args[0]
+            if isinstance(first, str):
+                args = (_format_first_print_arg(first),) + args[1:]
+        _orig_print(*args, **kwargs)
+
+    builtins.print = _ts_print
+
+    fmt = logging.Formatter(
+        "[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    root = logging.getLogger()
+    for handler in root.handlers:
+        handler.setFormatter(fmt)
+    for name in ("uiautomator2", "urllib3", "PIL"):
+        for handler in logging.getLogger(name).handlers:
+            handler.setFormatter(fmt)
+
+
+def _tag_log_message(message: str) -> str:
+    tag = device_log_tag().strip()
+    if tag and "[SN=" not in message:
+        return f"{tag} {message}"
+    return message
+
 
 def log_info(message):
     """
     记录信息日志
     """
-    logger.info(message)
+    logger.info(_tag_log_message(str(message)))
+
 
 def log_error(message):
     """
     记录错误日志
     """
-    logger.error(message)
+    logger.error(_tag_log_message(str(message)))
+
 
 def log_warning(message):
     """
     记录警告日志
     """
-    logger.warning(message)
+    logger.warning(_tag_log_message(str(message)))

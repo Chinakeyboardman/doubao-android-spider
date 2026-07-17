@@ -1,4 +1,16 @@
 # -*- coding: utf-8 -*-
+"""抽检 CSV 导出与签单提示词加载（单元 / 集成测试）。
+
+覆盖场景：
+- 从 CSV / xlsx 加载签单提示词、去重、试点抽样。
+- 黄金样本 record → 抽检行字段绑定（意图、引用列表 schema、URL 可达性字段）。
+- 已完成 keyword_id 断点续跑。
+
+运行：
+  pytest tests/test_qa_spot_check_export.py -q
+
+前置：部分用例依赖 logs/qa_capture 黄金样本或 var/ 下签单文件，缺失时 skip。
+"""
 
 from __future__ import annotations
 
@@ -15,6 +27,7 @@ from app.modules.qa_spot_check_export import (
   SignedPromptRow,
   SpotCheckBatchMeta,
   citations_to_spot_check_list,
+  count_unique_completed_keywords,
   dedupe_signed_prompts,
   extract_thinking_narrative,
   load_completed_keyword_ids,
@@ -38,6 +51,7 @@ def _find_signed_by_intent(intent_name: str) -> SignedPromptRow:
 
 
 def test_load_signed_prompts_from_xlsx():
+  """用例：雅诗兰黛 xlsx 签单应解析出 32 条且 keyword_id 以 EPN 开头。"""
   if not PROMPTS_XLSX.is_file():
     pytest.skip("雅诗兰黛签单 xlsx 不存在")
   rows = load_signed_prompts(str(PROMPTS_XLSX))
@@ -48,6 +62,7 @@ def test_load_signed_prompts_from_xlsx():
 
 
 def test_dedupe_signed_prompts_keeps_first():
+  """用例：相同 prompt 去重时保留第一条（keyword_id=a）。"""
   rows = [
     SignedPromptRow(
       project_name="p",
@@ -80,10 +95,12 @@ def test_dedupe_signed_prompts_keeps_first():
 
 
 def test_spot_check_columns_count():
+  """用例：抽检 CSV 列数固定为 29（与下游表结构契约）。"""
   assert len(SPOT_CHECK_COLUMNS) == 29
 
 
 def test_select_pilot_rows_covers_multiple_intents():
+  """用例：试点抽样 10 条应覆盖至少 8 个不同意图（分布均匀）。"""
   rows = load_signed_prompts(str(PROMPTS_CSV))
   pilot = select_pilot_rows(rows, 10)
   assert len(pilot) == 10
@@ -91,6 +108,7 @@ def test_select_pilot_rows_covers_multiple_intents():
 
 
 def test_extract_thinking_narrative_keywords_fallback():
+  """用例：思考 markdown 含重复标题时，仍能抽出「搜索关键词」叙事段落。"""
   md = (
     "## 搜索 3 个关键词，参考 15 篇资料\n\n"
     "### 思考过程\n\n"
@@ -104,17 +122,22 @@ def test_extract_thinking_narrative_keywords_fallback():
 
 
 def test_citations_to_spot_check_list_schema():
+  """用例：引用列表 JSON 含 webUrl 与 URL 可达性四字段（含 urlNum）。"""
   if not GOLDEN.is_file():
     pytest.skip("黄金样本不存在")
   record = json.loads(GOLDEN.read_text(encoding="utf-8"))
   cites = citations_to_spot_check_list(record["thinking_references"])
   assert cites
   first = cites[0]
-  assert set(first.keys()) == {"source", "title", "urlNum", "webUrl"}
+  assert set(first.keys()) == {
+    "source", "title", "urlNum", "webUrl",
+    "webUrlReachable", "urlCheckStatus", "urlHttpStatus", "urlCheckNote",
+  }
   assert first["webUrl"].startswith("http")
 
 
 def test_qa_record_to_spot_check_row_intent_binding():
+  """用例：record + 签单行 → CSV 字典，意图/词包/平台字段与签单一致。"""
   if not GOLDEN.is_file():
     pytest.skip("黄金样本不存在")
   if not PROMPTS_CSV.is_file():
@@ -149,6 +172,7 @@ def test_qa_record_to_spot_check_row_intent_binding():
 
 
 def test_load_completed_keyword_ids_roundtrip():
+  """用例：写入抽检 CSV 后 load_completed_keyword_ids 能读回 keyword_id 用于 --resume。"""
   with tempfile.TemporaryDirectory() as tmp:
     path = Path(tmp) / "out.csv"
     from app.modules.qa_spot_check_export import append_csv_row, SpotCheckRow
@@ -179,3 +203,19 @@ def test_load_completed_keyword_ids_roundtrip():
     append_csv_row(str(path), row)
     done = load_completed_keyword_ids(str(path))
     assert "KPN123" in done
+    assert count_unique_completed_keywords(str(path)) == 1
+
+
+def test_load_failure_counts():
+  with tempfile.TemporaryDirectory() as tmp:
+    path = Path(tmp) / "failures.jsonl"
+    path.write_text(
+      '{"keyword_id":"K1","error":"x"}\n'
+      '{"keyword_id":"K1","error":"y"}\n'
+      '{"keyword_id":"K2","error":"z"}\n',
+      encoding="utf-8",
+    )
+    from app.modules.qa_spot_check_export import load_failure_counts
+
+    counts = load_failure_counts(str(path))
+    assert counts == {"K1": 2, "K2": 1}

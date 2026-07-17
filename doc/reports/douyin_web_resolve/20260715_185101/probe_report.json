@@ -1,0 +1,130 @@
+{
+  "timestamp": "20260715_185101",
+  "device_id_query": "",
+  "min_interval_s": 0.0,
+  "aweme_probes": [
+    {
+      "aweme_id": "7428415093521648905",
+      "share_url": "https://www.douyin.com/jingxuan?modal_id=7428415093521648905",
+      "canonical_url": "https://www.douyin.com/video/7428415093521648905",
+      "short_url": "",
+      "verified": true,
+      "status": "ok",
+      "http_status": 200,
+      "note": "douyin_jingxuan_modal desktop follow 通过",
+      "redirect_chain": [
+        "https://www.douyin.com/jingxuan?modal_id=7428415093521648905"
+      ],
+      "captcha_suspected": false,
+      "strategy": "douyin_jingxuan_modal",
+      "format_id": "douyin_jingxuan_modal",
+      "elapsed_s": 0.57,
+      "share_url_built": "https://www.iesdouyin.com/share/video/7428415093521648905",
+      "format_matrix": [
+        {
+          "aweme_id": "7428415093521648905",
+          "share_url": "https://www.douyin.com/jingxuan?modal_id=7428415093521648905",
+          "canonical_url": "https://www.douyin.com/video/7428415093521648905",
+          "short_url": "",
+          "verified": true,
+          "status": "ok",
+          "http_status": 200,
+          "note": "douyin_jingxuan_modal desktop follow 通过",
+          "redirect_chain": [
+            "https://www.douyin.com/jingxuan?modal_id=7428415093521648905"
+          ],
+          "captcha_suspected": false,
+          "strategy": "douyin_jingxuan_modal",
+          "format_id": "douyin_jingxuan_modal",
+          "elapsed_s": 0.24,
+          "probe_url": "https://www.douyin.com/jingxuan?modal_id=7428415093521648905"
+        },
+        {
+          "aweme_id": "7428415093521648905",
+          "share_url": "https://www.douyin.com/video/7428415093521648905",
+          "canonical_url": "https://www.douyin.com/video/7428415093521648905",
+          "short_url": "",
+          "verified": true,
+          "status": "ok",
+          "http_status": 200,
+          "note": "douyin_video desktop follow 通过",
+          "redirect_chain": [
+            "https://www.douyin.com/video/7428415093521648905"
+          ],
+          "captcha_suspected": false,
+          "strategy": "douyin_video",
+          "format_id": "douyin_video",
+          "elapsed_s": 0.21,
+          "probe_url": "https://www.douyin.com/video/7428415093521648905"
+        },
+        {
+          "aweme_id": "7428415093521648905",
+          "share_url": "https://www.iesdouyin.com/share/video/7428415093521648905",
+          "canonical_url": "https://www.douyin.com/video/7428415093521648905",
+          "short_url": "",
+          "verified": true,
+          "status": "ok",
+          "http_status": 302,
+          "note": "iesdouyin_share desktop 302 通过",
+          "redirect_chain": [
+            "https://www.iesdouyin.com/share/video/7428415093521648905",
+            "https://www.douyin.com/video/7428415093521648905?previous_page=app_code_link"
+          ],
+          "captcha_suspected": false,
+          "strategy": "iesdouyin_share",
+          "format_id": "iesdouyin_share",
+          "elapsed_s": 0.23,
+          "probe_url": "https://www.iesdouyin.com/share/video/7428415093521648905"
+        },
+        {
+          "aweme_id": "7428415093521648905",
+          "share_url": "https://www.iesdouyin.com/share/video/7428415093521648905/?region=CN&app=aweme&utm_source=copy_link",
+          "canonical_url": "https://www.douyin.com/video/7428415093521648905",
+          "short_url": "",
+          "verified": true,
+          "status": "ok",
+          "http_status": 302,
+          "note": "iesdouyin_share_query desktop 302 通过",
+          "redirect_chain": [
+            "https://www.iesdouyin.com/share/video/7428415093521648905/?region=CN&app=aweme&utm_source=copy_link",
+            "https://www.douyin.com/video/7428415093521648905?previous_page=app_code_link"
+          ],
+          "captcha_suspected": false,
+          "strategy": "iesdouyin_share_query",
+          "format_id": "iesdouyin_share_query",
+          "elapsed_s": 0.27,
+          "probe_url": "https://www.iesdouyin.com/share/video/7428415093521648905/?region=CN&app=aweme&utm_source=copy_link"
+        }
+      ]
+    }
+  ],
+  "short_probes": [
+    {
+      "aweme_id": "6883418578486349070",
+      "share_url": "https://www.douyin.com/jingxuan?modal_id=6883418578486349070",
+      "canonical_url": "https://www.douyin.com/video/6883418578486349070",
+      "short_url": "https://v.douyin.com/JPa1xhq/",
+      "verified": true,
+      "status": "ok",
+      "http_status": 200,
+      "note": "短链展开成功",
+      "redirect_chain": [
+        "https://v.douyin.com/JPa1xhq/",
+        "https://www.iesdouyin.com/share/video/6883418578486349070/?app=aweme&mid=6883418927515421454&region=CN&titleType=title&u_code=0&utm_campaign=client_share&utm_medium=android&utm_source=copy_link"
+      ],
+      "captcha_suspected": false,
+      "strategy": "expand_short_link",
+      "format_id": "",
+      "elapsed_s": 0.46,
+      "input_short_url": "https://v.douyin.com/JPa1xhq/"
+    }
+  ],
+  "verified_count": 1,
+  "overall_ok": true,
+  "summary_notes": [
+    "aweme_id 多格式级联 1/1 通过",
+    "best_verified 优先 jingxuan modal_id → douyin.com/video → iesdouyin",
+    "格式矩阵见各 aweme_id 小节",
+    "v.douyin.com 无法从 aweme_id 正向生成（仅反向展开可行）"
+  ]
+}

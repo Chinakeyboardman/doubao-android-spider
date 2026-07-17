@@ -27,10 +27,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from app.modules.flow_crawler import FlowCrawler
 from app.config.profile_loader import load_profile
 from app.utils.device import DeviceManager
-from app.utils.utils import log_info, log_error
+from app.utils.utils import log_info, log_error, install_op_logging, set_op_log_device
 
 
 def main() -> int:
+    install_op_logging()
+
     parser = argparse.ArgumentParser(description="豆包商品爬虫")
     parser.add_argument("--prompt", type=str, default="请推荐2026年最好用的旗舰手机",
                         help="发送的提示词")
@@ -49,6 +51,8 @@ def main() -> int:
     parser.add_argument("--sms-device-id", default=None,
                         help="SMS API 设备标识（默认 doubao_spider）")
     args = parser.parse_args()
+
+    set_op_log_device(args.serial)
 
     dm = DeviceManager(args.serial)
     device = dm.get_device()

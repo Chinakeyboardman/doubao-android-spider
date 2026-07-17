@@ -102,7 +102,7 @@ def test_no_search_refs_with_good_answer_passes():
 
 
 def test_allow_partial_douyin_applies_ratio_to_douyin_only_refs():
-  """仅抖音引用时 allow_partial 与 50% 比例联合判定，不再被全量比例抢先否决。"""
+  """仅抖音引用时 allow_partial 与 50% 比例联合判定。"""
   refs = [
     {"title": f"#折叠屏推荐话题{i}", "url": f"https://www.iesdouyin.com/v/{i}" if i < 5 else ""}
     for i in range(9)
@@ -116,3 +116,52 @@ def test_allow_partial_douyin_applies_ratio_to_douyin_only_refs():
   assert report.url_count == 5
   assert report.ref_count == 9
   assert report.ok
+
+
+def test_allow_partial_zero_urls_passes():
+  """有引用但一条链都没解析到，视为「本来无链」可通过。"""
+  refs = [{"title": f"引用{i}", "url": ""} for i in range(12)]
+  report = validate_qa_session(
+    **_passing_session_kwargs(thinking_references=refs),
+    allow_missing_douyin_urls=True,
+    min_url_resolve_ratio=DEFAULT_MIN_URL_RESOLVE_RATIO,
+    require_all_urls=False,
+  )
+  assert report.url_count == 0
+  assert report.ok
+
+
+def test_allow_partial_douyin_urls_count_toward_ratio_not_web_gate():
+  """13/18 全为抖音链、无网页链时，按总比例通过，不再要求「至少 1 条网页 URL」。"""
+  refs = []
+  for i in range(18):
+    if i < 13:
+      refs.append({
+        "title": f"#话题{i}",
+        "url": f"https://www.douyin.com/jingxuan?modal_id=685384615292055065{i}",
+      })
+    elif i < 15:
+      refs.append({"title": "凤凰网：观赛手机选购", "url": ""})
+    else:
+      refs.append({"title": f"#短视频{i}", "url": ""})
+  report = validate_qa_session(
+    **_passing_session_kwargs(thinking_references=refs),
+    allow_missing_douyin_urls=True,
+    min_url_resolve_ratio=DEFAULT_MIN_URL_RESOLVE_RATIO,
+    require_all_urls=False,
+  )
+  assert report.url_count == 13
+  assert report.ref_count == 18
+  assert report.ok
+
+
+def test_allow_partial_partial_urls_below_ratio_fails():
+  refs = [{"title": f"r{i}", "url": f"http://ex/{i}" if i < 4 else ""} for i in range(10)]
+  report = validate_qa_session(
+    **_passing_session_kwargs(thinking_references=refs),
+    allow_missing_douyin_urls=True,
+    min_url_resolve_ratio=DEFAULT_MIN_URL_RESOLVE_RATIO,
+    require_all_urls=False,
+  )
+  assert report.url_count == 4
+  assert not report.ok
