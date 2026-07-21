@@ -1911,7 +1911,9 @@ class DoubaoQaCapture:
         if nav.reenter_chat_by_prompt(prompt):
           print("[问答] 会话错位后已重进，继续采集")
         else:
-          print("[问答] 会话可能错位，仍继续采集（避免空数据中止）")
+          print("[问答] 会话错位且无法重进，中止本轮采集并重试")
+          self._save_record(record)
+          return record
 
     # 等待回答操作栏（复制按钮）就绪后再采集；就绪即继续，未就绪退回原固定等待时长
     poll_until(
@@ -1927,6 +1929,13 @@ class DoubaoQaCapture:
 
     early_answer_body = self._capture_answer_body_early(session_dir, prompt)
     _phase("早期正文采集")
+    if not self._ensure_expected_chat(prompt, phase="正文采集前"):
+      from app.modules.navigator import Navigator
+      nav = Navigator(self.d)
+      if not nav.reenter_chat_by_prompt(prompt, early_answer_body or ""):
+        print("[问答] 正文采集前会话校验失败，中止并重试")
+        self._save_record(record)
+        return record
     if self._answer_looks_like_quota_block(early_answer_body):
       print(
         "[问答] 检测到专家/专业版额度提示，中止本轮采集并重试"

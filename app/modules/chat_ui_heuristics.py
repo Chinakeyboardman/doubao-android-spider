@@ -115,7 +115,28 @@ _CHAT_PLACEHOLDER_TEXTS = frozenset({
     "发消息或按住说话",
     "发消息",
     "输入消息",
+    # 操作栏/系统文案，勿当作用户提问（Honor 曾因此误判会话错位）
+    "加入收藏夹",
+    "收藏",
+    "取消收藏",
+    "复制",
+    "分享",
+    "重新生成",
+    "点赞",
+    "点踩",
 })
+
+
+def _looks_like_ui_chrome(text: str) -> bool:
+    """短操作文案 / 收藏夹等，不是用户提问气泡。"""
+    t = (text or "").strip()
+    if not t:
+        return True
+    if t in _CHAT_PLACEHOLDER_TEXTS:
+        return True
+    if len(t) <= 8 and any(k in t for k in ("收藏", "复制", "分享", "点赞", "点踩")):
+        return True
+    return False
 
 
 def text_anchor_visible(
@@ -180,7 +201,7 @@ def read_visible_user_prompt(
         profile=p,
     )
     q = (parsed.question_text or "").strip()
-    if not q or q in _CHAT_PLACEHOLDER_TEXTS:
+    if not q or _looks_like_ui_chrome(q):
         return ""
     return q
 
@@ -188,7 +209,7 @@ def read_visible_user_prompt(
 def prompt_matches_chat(expected: str, visible: str) -> bool:
     """当前屏用户问题是否与期望提示词一致（容忍空白/占位）。"""
     visible = (visible or "").strip()
-    if not visible or visible in _CHAT_PLACEHOLDER_TEXTS:
+    if not visible or _looks_like_ui_chrome(visible):
         return False
     exp_key, exp_short = norm_prompt_keys(expected)
     vis_key, _ = norm_prompt_keys(visible)
@@ -228,7 +249,7 @@ def chat_prompt_conflicts(
     visible = read_visible_user_prompt(
         device, profile=profile, expected_prompt=expected_prompt,
     )
-    if not visible:
+    if not visible or _looks_like_ui_chrome(visible):
         return False, ""
     if prompt_matches_chat(expected_prompt, visible):
         return False, visible

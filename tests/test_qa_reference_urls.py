@@ -551,6 +551,25 @@ def test_chat_context_guard_disabled_skips_check(monkeypatch):
   assert called["n"] == 0
 
 
+def test_chat_context_force_check_when_guard_off(monkeypatch):
+  """回退后 force=True 时仍校验（Honor safe_back 防落历史会话）。"""
+  from unittest.mock import MagicMock
+
+  from app.config.gesture_profile import GestureProfile
+  from app.modules.qa_reference_urls import _chat_context_ok
+
+  monkeypatch.setattr(
+    "app.modules.chat_ui_heuristics.chat_prompt_conflicts",
+    lambda *_a, **_k: (True, "历史提问"),
+  )
+  monkeypatch.setattr("app.modules.qa_reference_urls.time.sleep", lambda *_a: None)
+  profile = GestureProfile(
+    qa_resolve_session_guard=False,
+    qa_resolve_verify_chat_after_back=True,
+  )
+  assert _chat_context_ok(MagicMock(), "目标提问？", profile, "t", force=True) is False
+
+
 def test_chat_context_reconfirm_clears_transient(monkeypatch):
   """首读冲突、二次读不冲突 → 判定误判，返回 True。"""
   from unittest.mock import MagicMock

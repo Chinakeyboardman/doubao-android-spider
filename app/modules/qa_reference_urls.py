@@ -1121,26 +1121,42 @@ def _ensure_chat_after_resolve(
   profile: GestureProfile,
   *,
   tag: str,
+  expected_prompt: str = "",
 ) -> bool:
   """
   解析单条后稳健回到聊天页（兼容荣耀等较慢机型的 WebActivity/评论页多层回退）。
 
   lite_back 一次不够时，温和回豆包 + safe_back 循环补齐，避免误判漂移触发重启。
+  回聊天后若提供 expected_prompt，校验是否仍在目标会话（错位则重进）。
   """
   from app.modules.navigator import Page
 
   p, _ = nav.current_page()
   if p == Page.CHAT:
+    if expected_prompt:
+      return _ensure_target_chat_session(
+        device, nav, profile, expected_prompt, tag,
+      )
     return True
   nav.lite_back_to_chat()
   p, _ = nav.current_page()
   if p == Page.CHAT:
+    if expected_prompt:
+      return _ensure_target_chat_session(
+        device, nav, profile, expected_prompt, tag,
+      )
     return True
   _log_url(f"{tag} lite_back 未回聊天页({p.name})，safe_back 兜底")
   nav.recover_from_external_douyin(gentle=True)
   nav.safe_back_to_chat(max_backs=profile.qa_resolve_url_max_backs)
   p, _ = nav.current_page()
-  return p == Page.CHAT
+  if p != Page.CHAT:
+    return False
+  if expected_prompt:
+    return _ensure_target_chat_session(
+      device, nav, profile, expected_prompt, tag,
+    )
+  return True
 
 
 # 会话恢复时用于在会话抽屉里辨识目标会话的回答正文片段（唯一性强于标题摘要）
@@ -1230,6 +1246,8 @@ def _chat_context_ok(
   expected_prompt: str,
   profile: GestureProfile,
   tag: str,
+  *,
+  force: bool = False,
 ) -> bool:
   """
   URL 解析期会话校验（宽松）：仅当屏上出现另一条不同提问时判定错位。
@@ -1237,13 +1255,14 @@ def _chat_context_ok(
   引用解析途中问题气泡本就滚出屏幕，读不到用户气泡不算证据，避免误杀空转。
   目标回答正文锚点仍在屏上时视为未错位。
 
-  - `qa_resolve_session_guard=False`：完全跳过（60710 轻量模式，不校验不恢复）。
+  - `qa_resolve_session_guard=False` 且未 force：跳过（60710 轻量模式）。
+  - `force=True` 或 `_ensure_target_chat_session` 内调用：始终校验（回退后防落历史会话）。
   - 判定错位前默认二次确认：单次 hierarchy dump 可能残缺，隔一小段再读一次，
     两次都冲突才判错位，消除瞬时误判导致的空转/强杀。
   """
   if not (expected_prompt or "").strip():
     return True
-  if not getattr(profile, "qa_resolve_session_guard", True):
+  if not force and not getattr(profile, "qa_resolve_session_guard", True):
     return True
   from app.modules.chat_ui_heuristics import chat_prompt_conflicts
 
@@ -1307,7 +1326,7 @@ def _ensure_target_chat_session(
   """
   if not (expected_prompt or "").strip():
     return True
-  if _chat_context_ok(device, expected_prompt, profile, tag):
+  if _chat_context_ok(device, expected_prompt, profile, tag, force=True):
     return True
 
   from app.modules.navigator import Page
@@ -1319,12 +1338,12 @@ def _ensure_target_chat_session(
     page, _ = nav.current_page()
     if page != Page.CHAT:
       nav.safe_back_to_chat(max_backs=profile.qa_resolve_url_max_backs)
-    if _chat_context_ok(device, expected_prompt, profile, f"{tag} 回聊天"):
+    if _chat_context_ok(device, expected_prompt, profile, f"{tag} 回聊天", force=True):
       return True
 
   if _reenter_target_chat(nav, expected_prompt, tag=tag):
     _reanchor_ref_list_after_back(device, profile, nav, tag=f"{tag} 重进")
-    return _chat_context_ok(device, expected_prompt, profile, f"{tag} 重进后")
+    return _chat_context_ok(device, expected_prompt, profile, f"{tag} 重进后", force=True)
   return False
 
 
@@ -2650,7 +2669,9 @@ def _resolve_one_citation_url(
         _log_url(f"#{ref_idx} 点击后 WebActivity dumpsys: {url[:96]}")
     if url:
       url = _finalize_douyin_url(url, profile)
-      _ensure_chat_after_resolve(device, nav, profile, tag=f"#{ref_idx} web直出")
+      _ensure_chat_after_resolve(
+        device, nav, profile, tag=f"#{ref_idx} web直出", expected_prompt=expected_prompt,
+      )
       _reanchor_ref_list_after_back(device, profile, nav, tag=f"#{ref_idx} web直出")
       if expected_prompt and not _chat_context_ok(
         device, expected_prompt, profile, f"#{ref_idx} web直出后",
@@ -2698,7 +2719,9 @@ def _resolve_one_citation_url(
       url = _douyin_url_from_id(ids[0], profile)
       if url:
         _log_url(f"#{ref_idx} PC Web logcat id={ids[0]} → {url[:96]}")
-        _ensure_chat_after_resolve(device, nav, profile, tag=f"#{ref_idx} logcat id")
+        _ensure_chat_after_resolve(
+          device, nav, profile, tag=f"#{ref_idx} logcat id", expected_prompt=expected_prompt,
+        )
         _reanchor_ref_list_after_back(device, profile, nav, tag=f"#{ref_idx} logcat id")
         if expected_prompt and not _chat_context_ok(
           device, expected_prompt, profile, f"#{ref_idx} logcat id",
@@ -2718,7 +2741,9 @@ def _resolve_one_citation_url(
       if url:
         _log_url(f"#{ref_idx} 豆包 WebActivity 同屏命中: {url[:96]}")
         url = _finalize_douyin_url(url, profile)
-        _ensure_chat_after_resolve(device, nav, profile, tag=f"#{ref_idx} web后")
+        _ensure_chat_after_resolve(
+          device, nav, profile, tag=f"#{ref_idx} web后", expected_prompt=expected_prompt,
+        )
         _reanchor_ref_list_after_back(device, profile, nav, tag=f"#{ref_idx} web后")
         return url
     nav.wait_and_accept_app_jump(timeout=6.0)

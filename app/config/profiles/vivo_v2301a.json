@@ -20,6 +20,7 @@
   "qa_resolve_url_phase_budget_sec": 0,
   "qa_resolve_recover_max_per_task": 0,
   "qa_resolve_session_guard": false,
+  "qa_resolve_verify_chat_after_back": false,
   "qa_resolve_skip_brute_pass": true,
   "qa_resolve_simple_mode": true,
   "qa_resolve_skip_douyin_per_click": false,

@@ -244,6 +244,8 @@ class GestureProfile:
     qa_resolve_recover_max_per_task: int = 3
     # URL 解析期会话守卫：False=完全不做错位校验/恢复（60710 轻量模式）
     qa_resolve_session_guard: bool = True
+    # URL 回退后强制校验目标会话（即使 session_guard=False；Honor safe_back 易落历史会话）
+    qa_resolve_verify_chat_after_back: bool = False
     # 判定错位前二次确认（隔 reconfirm_sleep 再读一次），消除瞬时误判
     qa_resolve_session_guard_reconfirm: bool = True
     qa_resolve_session_guard_reconfirm_sleep: float = 0.6
