@@ -294,6 +294,8 @@ EOF
 
 | 文档 | 内容 |
 |------|------|
+| [`doc/spot_check_projects.md`](doc/spot_check_projects.md) | 签单抽检：vivo-x-fold6 / 雅诗兰黛 多机启动、换机同步、规范 |
+| [`doc/qa_capture.md`](doc/qa_capture.md) | QA 问答采集、抽检 CSV、无人值守 |
 | [`doc/real_flow_analysis.md`](doc/real_flow_analysis.md) | 真实流程分析、Activity、rid、产出与限制 |
 | [`doc/capture_frida_gadget.md`](doc/capture_frida_gadget.md) | Frida Gadget + mitmproxy 抓包步骤 |
 | [`doc/capture_observed_traffic.md`](doc/capture_observed_traffic.md) | 抓包中常见非业务请求备忘 |

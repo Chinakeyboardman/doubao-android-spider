@@ -259,10 +259,17 @@ python run_qa_spot_check.py \\
 python run_qa_spot_check.py --purge-incomplete --resume --strict --allow-partial-douyin-urls
 ```
 
-**无人值守（screen + monitor）**：通用引擎在 `scripts/run_unattended_spot_check.sh`；**项目专用包装脚本放在 `var/<项目>/run_unattended.sh`（不入 git）**，由 AI 按签单路径改写后执行，例如：
+**无人值守（screen + monitor）**：通用引擎在 `scripts/run_unattended_spot_check.sh`；**项目专用包装脚本放在 `var/<项目>/`（不入 git）**。多机并发用 `run_multi.sh`，单机用 `run_unattended.sh`。完整对照见 [`doc/spot_check_projects.md`](spot_check_projects.md)。
 
 ```bash
-bash var/vivo-x-fold6/run_unattended.sh start   # status / stop / restart
+# vivo-x-fold6（123 条，多机）
+bash var/vivo-x-fold6/run_multi.sh start
+
+# 雅诗兰黛（32 条 xlsx，多机；须 ALLOW_PARTIAL=0）
+bash var/雅诗兰黛/run_multi.sh start
+
+# 单机
+bash var/雅诗兰黛/run_unattended.sh start   # status / stop / restart
 ```
 
 `scripts/` 仅保留通用、demo 与测试辅助脚本，不提交临时项目包装。
